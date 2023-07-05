@@ -84,12 +84,16 @@ def measure(dataset, infereces):
         evaluation_df["annotation"], evaluation_df["inferece"], labels=all_labels
     )
 
-    cm_display = ConfusionMatrixDisplay(cm, display_labels=all_labels).plot().figure_
+    cm_display = ConfusionMatrixDisplay(cm, display_labels=all_labels)
+    cm_display.plot()
+    cm_display.ax_.set_xlabel("Inference Labels")
+    cm_display.ax_.set_ylabel("Annotation Labels")
+    cm_display.figure_.autofmt_xdate(rotation=45)
 
     metrics = {
         "accuracy": acc,
         "confusion_matrix": cm,
-        "confusion_matrix_display": cm_display,
+        "confusion_matrix_display": cm_display.figure_,
         "hit_miss": evaluation_df,
         "annotation_labels": annotation_labels,
         "inference_labels": inference_labels,
