@@ -101,7 +101,7 @@ def run_evaluation(prompt_template, dataset, model, progress=None):
 
 
 def combine_labels(labels):
-    return " | ".join(f"`{label}`" for label in labels)
+    return "\n".join(f"``{label}``" for label in labels)
 
 
 if "dataset" not in st.session_state:
