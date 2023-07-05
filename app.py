@@ -22,7 +22,7 @@ STARTER_PROMPT = """Classify whether the following sentence has a positive or ne
 
 Sentence: ```{text}```
 
-Sentiment [Positive/Negative]: """
+Sentiment [positive/negative]: """
 
 
 def prepare_dataset():
@@ -33,7 +33,7 @@ def prepare_dataset():
         .to_pandas()
     )
 
-    dataset_df["label"].replace({1: "Positive", 0: "Negative"}, inplace=True)
+    dataset_df["label"].replace({1: "positive", 0: "negative"}, inplace=True)
 
     return dataset_df
 
