@@ -1,5 +1,7 @@
 """Prompt Evaluator."""
 
+import string
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -7,6 +9,8 @@ from datasets import load_dataset
 from huggingface_hub import InferenceClient
 from huggingface_hub.utils import HfHubHTTPError
 from sklearn.metrics import ConfusionMatrixDisplay, accuracy_score, confusion_matrix
+
+TITLE = "Prompt Evaluator"
 
 HF_MODEL = "tiiuae/falcon-7b-instruct"
 HF_DATASET = "amazon_polarity"
@@ -22,7 +26,7 @@ STARTER_PROMPT = """Classify whether the following sentence has a positive or ne
 
 Sentence: ```{text}```
 
-Sentiment [positive/negative]: """
+Sentiment: """
 
 
 def prepare_dataset():
@@ -101,7 +105,7 @@ def run_evaluation(prompt_template, dataset, model, progress=None):
 
 
 def combine_labels(labels):
-    return "\n".join(f"``{label}``" for label in labels)
+    return "|".join(f"``{label}``" for label in labels)
 
 
 if "dataset" not in st.session_state:
@@ -109,7 +113,9 @@ if "dataset" not in st.session_state:
 if "client" not in st.session_state:
     st.session_state["client"] = InferenceClient(token=st.secrets.get("hf_token"))
 
-st.title("Prompt Evaluator")
+st.set_page_config(page_title=TITLE)
+
+st.title(TITLE)
 
 with st.form("prompt_template_form"):
     model = st.text_input("Model", HF_MODEL)
@@ -124,6 +130,15 @@ with st.form("prompt_template_form"):
             st.stop()
         if not prompt_template:
             st.error("Prompt template must be specified.")
+            st.stop()
+
+        _, formats, *_ = zip(*string.Formatter().parse(prompt_template))
+        is_valid_prompt_template = set(formats) == {"text"} or set(formats) == {
+            "text",
+            None,
+        }
+        if not is_valid_prompt_template:
+            st.error("Prompt template must contain a single {{text}} field.")
             st.stop()
 
         inference_progress = st.progress(0, "Executing Inference")
