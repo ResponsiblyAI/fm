@@ -16,8 +16,7 @@ LOGGER = logging.getLogger(__name__)
 
 TITLE = "Prompter"
 
-FALLBACK_HF_MODEL = "timdettmers/guanaco-33b-merged"
-HF_MODEL = st.secrets.get("hf_model", FALLBACK_HF_MODEL)
+HF_MODEL = st.secrets.get("hf_model")
 
 HF_DATASET = "amazon_polarity"
 
