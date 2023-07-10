@@ -432,4 +432,4 @@ with tab3:
         with st.spinner("Generating..."):
             output = complete(prompt, st.session_state["generation_config"])
 
-        st.write(output)
+        st.text(output)
