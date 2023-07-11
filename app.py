@@ -153,6 +153,9 @@ def complete(prompt, generation_config):
     output = response.generated_text
 
     # Remove stop sequences from the output
+    # Inspired by
+    # https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/inference.py
+    # https://huggingface.co/spaces/tiiuae/falcon-chat/blob/main/app.py
     if (
         "stop_sequences" in generation_config
         and generation_config["stop_sequences"] is not None
@@ -194,6 +197,7 @@ def preprocess_output_line(text):
 
 
 # Inspired by OpenAI depcriated classification endpoint API
+# They take the label from the first line of the output
 # https://github.com/openai/openai-cookbook/blob/main/transition_guides_for_deprecated_API_endpoints/classification_functionality_example.py
 # https://help.openai.com/en/articles/6272941-classifications-transition-guide#h_e63b71a5c8
 # Here we take the label from either the *first* or *last* (for CoT) line of the output
