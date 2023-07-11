@@ -69,6 +69,11 @@ GENERATION_CONFIG_PARAMS = {
         "NAME": "Sampling",
         "DEFAULT": False,
     },
+    "stop_sequences": {
+        "NAME": "Stop Sequences",
+        "DEFAULT": [r"\nUser:", r"<|endoftext|>"],
+        "SAMPLING": False,
+    },
 }
 
 GENERATION_CONFIG_DEFAULTS = {
@@ -78,6 +83,14 @@ GENERATION_CONFIG_DEFAULTS = {
 STARTER_PROMPT = """{text}
 
 The sentiment of the text is"""
+
+
+def strip_newline_space(text):
+    return text.strip("\n").strip()
+
+
+def normalize(text):
+    return strip_newline_space(text).lower().capitalize()
 
 
 def prepare_datasets():
@@ -91,6 +104,7 @@ def prepare_datasets():
             .to_pandas()
         )
 
+        df["content"] = df["content"].apply(strip_newline_space)
         df["label"].replace(label_dict, inplace=True)
         df.drop(columns=["title"], inplace=True)
 
@@ -138,6 +152,14 @@ def complete(prompt, generation_config):
 
     output = response.generated_text
 
+    # Remove stop sequences from the output
+    if (
+        "stop_sequences" in generation_config
+        and generation_config["stop_sequences"] is not None
+    ):
+        for stop_sequence in generation_config["stop_sequences"]:
+            output = output.rsplit(stop_sequence, maxsplit=1)[0]
+
     # response = st.session_state.client.post(json={"inputs": prompt})
     # output = response.json()[0]["generated_text"]
     # output = st.session_state.client.conversational(prompt, model=model)
@@ -163,12 +185,12 @@ def infer_multi(prompt_template, text_series, generation_config=None, progress=N
     return text_series.apply(infer_with_progress)
 
 
-def normalize(text):
-    return text.strip().lower().capitalize()
-
-
 def preprocess_output_line(text):
-    return [normalize(str(token)) for token in st.session_state.tokenizer(text)]
+    return [
+        normalized_token
+        for token in st.session_state.tokenizer(text)
+        if (normalized_token := normalize(str(token)))
+    ]
 
 
 # Inspired by OpenAI depcriated classification endpoint API
@@ -183,7 +205,7 @@ def canonize_label(output, annotation_labels, search_row):
 
     annotation_labels_set = set(annotation_labels)
 
-    output_lines = output.strip("\n").split("\n")
+    output_lines = strip_newline_space(output).split("\n")
     output_search_words = preprocess_output_line(output_lines[search_row_index])
 
     label_matches = set(output_search_words) & annotation_labels_set
@@ -296,13 +318,24 @@ with st.sidebar:
             for name, params in GENERATION_CONFIG_PARAMS.items()
             if "START" in params
         }
-        generation_config_checkbox = {
-            name: st.checkbox(params["NAME"], params["DEFAULT"])
-            for name, params in GENERATION_CONFIG_PARAMS.items()
-            if "START" not in params
-        }
 
-        generation_config = generation_config_sliders | generation_config_checkbox
+        do_sample = st.checkbox(
+            GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
+            value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
+        )
+
+        stop_sequences = st.text_area(
+            GENERATION_CONFIG_PARAMS["stop_sequences"]["NAME"],
+            value="\n".join(GENERATION_CONFIG_PARAMS["stop_sequences"]["DEFAULT"]),
+        )
+
+        stop_sequences = [
+            clean_stop.encode().decode("unicode_escape")  # interpret \n as newline
+            for stop in stop_sequences.split("\n")
+            if (clean_stop := stop.strip())
+        ]
+        if not stop_sequences:
+            stop_sequences = None
 
         seed = st.text_input("Seed").strip()
 
@@ -348,7 +381,9 @@ with st.sidebar:
                 )
                 st.stop()
 
-            generation_config["seed"] = seed
+            generation_config = generation_config_sliders | dict(
+                stop_sequences=stop_sequences, seed=seed
+            )
 
             st.session_state["client"] = InferenceClient(
                 token=st.secrets.get("hf_token"), model=model
