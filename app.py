@@ -527,6 +527,6 @@ with tab3:
             st.stop()
 
         with st.spinner("Generating..."):
-            output = complete(prompt, st.session_state["generation_config"])
+            output, _ = complete(prompt, st.session_state["generation_config"])
 
         st.text(output)
