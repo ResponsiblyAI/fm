@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 from datasets import load_dataset
 from datasets.tasks.text_classification import ClassLabel
-from huggingface_hub import InferenceClient, model_info
+from huggingface_hub import InferenceClient, model_info, dataset_info
 from huggingface_hub.utils import HfHubHTTPError
 from sklearn.metrics import ConfusionMatrixDisplay, accuracy_score, confusion_matrix
 from spacy.lang.en import English
@@ -450,7 +450,11 @@ with st.sidebar:
             LOGGER.warning(f"FORM {generation_config=}")
 
     with st.expander("Info"):
+        st.caption("Dataset")
+        st.write(dataset_info(dataset).cardData)
+        st.caption("Model")
         st.write(model_info(model).cardData)
+
         # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
 
 tab1, tab2, tab3 = st.tabs(["Evaluation", "Training Dataset", "Playground"])
