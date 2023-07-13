@@ -21,8 +21,11 @@ HF_MODEL = st.secrets.get("hf_model")
 
 HF_DATASET = st.secrets.get("hf_dataset")
 
-DATASET_SHUFFLE_SEED = 42
-NUM_SAMPLES = 25
+DATASET_SPLIT_SEED = 42
+TRAIN_SIZE = 20
+TEST_SIZE = 50
+SPLITS = ["train", "test"]
+
 PROMPT_TEXT_HEIGHT = 300
 
 UNKNOWN_LABEL = "Unknown"
@@ -91,8 +94,8 @@ def normalize(text):
     return strip_newline_space(text).lower().capitalize()
 
 
-def prepare_datasets():
-    ds = load_dataset(HF_DATASET)
+def prepare_datasets(dataset_name):
+    ds = load_dataset(dataset_name)
 
     label_columns = [
         (name, info)
@@ -105,13 +108,14 @@ def prepare_datasets():
     label_dict = dict(enumerate(labels))
     input_columns = [name for name in ds["train"].features if name != label_column]
 
-    def load(split):
-        ds_split = ds[split]
+    ds = ds["train"].train_test_split(
+        train_size=TRAIN_SIZE, test_size=TEST_SIZE, seed=DATASET_SPLIT_SEED
+    )
 
-        if split == "train":
-            ds_split = ds_split.shuffle(seed=DATASET_SHUFFLE_SEED).select(
-                range(NUM_SAMPLES)
-            )
+    dfs = {}
+
+    for split in ["train", "test"]:
+        ds_split = ds[split]
 
         df = ds_split.to_pandas()
 
@@ -120,10 +124,9 @@ def prepare_datasets():
 
         df[label_column] = df[label_column].replace(label_dict)
 
-        return df
+        dfs[split] = df
 
-    # (load(split) for split in ("train",))
-    return (load("train"), input_columns, label_column, labels)
+    return dfs, input_columns, label_column, labels
 
 
 def complete(prompt, generation_config, details=False):
@@ -204,7 +207,7 @@ def infer_multi(prompt_template, inputs_df, generation_config=None, progress=Non
 def preprocess_output_line(text):
     return [
         normalized_token
-        for token in st.session_state.tokenizer(text)
+        for token in st.session_state.processing_tokenizer(text)
         if (normalized_token := normalize(str(token)))
     ]
 
@@ -300,18 +303,19 @@ if "client" not in st.session_state:
         token=st.secrets.get("hf_token"), model=HF_MODEL
     )
 
-if "tokenizer" not in st.session_state:
-    st.session_state["tokenizer"] = English().tokenizer
+if "processing_tokenizer" not in st.session_state:
+    st.session_state["processing_tokenizer"] = English().tokenizer
 
 if "train_dataset" not in st.session_state or "test_dataset" not in st.session_state:
     (
-        st.session_state["train_dataset"],
-        # st.session_state["test_dataset"],
+        splits_df,
         st.session_state["input_columns"],
         st.session_state["label_column"],
         st.session_state["labels"],
-    ) = prepare_datasets()
-    st.session_state["test_dataset"] = st.session_state["train_dataset"]
+    ) = prepare_datasets(HF_DATASET)
+
+    for split in splits_df:
+        st.session_state[f"{split}_dataset"] = splits_df[split]
 
 if "generation_config" not in st.session_state:
     st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
@@ -322,7 +326,9 @@ st.title(TITLE)
 
 with st.sidebar:
     with st.form("model_form"):
-        model = st.text_input("Model", HF_MODEL)
+        dataset = st.text_input("Dataset", HF_DATASET).strip()
+
+        model = st.text_input("Model", HF_MODEL).strip()
 
         # Defautlt values from:
         # https://huggingface.co/docs/transformers/v4.30.0/main_classes/text_generation
@@ -365,6 +371,10 @@ with st.sidebar:
         submitted = st.form_submit_button("Set")
 
         if submitted:
+            if not dataset:
+                st.error("Dataset must be specified.")
+                st.stop()
+
             if not model:
                 st.error("Model must be specified.")
                 st.stop()
@@ -411,8 +421,20 @@ with st.sidebar:
             st.session_state["client"] = InferenceClient(
                 token=st.secrets.get("hf_token"), model=model
             )
+
             st.session_state["generation_config"] = generation_config
 
+            (
+                splits_df,
+                st.session_state["input_columns"],
+                st.session_state["label_column"],
+                st.session_state["labels"],
+            ) = prepare_datasets(dataset)
+
+            for split in splits_df:
+                st.session_state[f"{split}_dataset"] = splits_df[split]
+
+            LOGGER.warning(f"FORM {dataset=}")
             LOGGER.warning(f"FORM {model=}")
             LOGGER.warning(f"FORM {generation_config=}")
 
