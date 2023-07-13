@@ -274,7 +274,7 @@ def measure(dataset, outputs, lengths, search_row):
 
     cm_display = ConfusionMatrixDisplay(cm, display_labels=inference_labels)
     cm_display.plot()
-    cm_display.ax_.set_xlabel("inference Labels")
+    cm_display.ax_.set_xlabel("Inference Labels")
     cm_display.ax_.set_ylabel("Annotation Labels")
     cm_display.figure_.autofmt_xdate(rotation=45)
 
