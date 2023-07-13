@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 from datasets import load_dataset
 from datasets.tasks.text_classification import ClassLabel
-from huggingface_hub import InferenceClient
+from huggingface_hub import InferenceClient, model_info
 from huggingface_hub.utils import HfHubHTTPError
 from sklearn.metrics import ConfusionMatrixDisplay, accuracy_score, confusion_matrix
 from spacy.lang.en import English
@@ -129,7 +129,7 @@ def prepare_datasets(dataset_name):
     return dfs, input_columns, label_column, labels
 
 
-def complete(prompt, generation_config, details=False):
+def complete(prompt, generation_config, details=True):
     if generation_config is None:
         generation_config = {}
 
@@ -164,7 +164,13 @@ def complete(prompt, generation_config, details=False):
     response = st.session_state.client.text_generation(
         prompt, stream=False, details=details, **generation_config
     )
-    LOGGER.debug(response)
+    LOGGER.warning(response)
+
+    length = (
+        len(response.details.prefill) + len(response.details.tokens)
+        if details
+        else None
+    )
 
     output = response.generated_text if details else response
 
@@ -183,25 +189,25 @@ def complete(prompt, generation_config, details=False):
     # output = response.json()[0]["generated_text"]
     # output = st.session_state.client.conversational(prompt, model=model)
     # output = output if "https" in st.session_state.client.model else output[len(prompt) :]
-    return output
+    return output, length
 
 
 def infer(prompt_template, inputs, generation_config=None):
     prompt = prompt_template.format(**inputs)
-    output = complete(prompt, generation_config)
-    return output
+    output, length = complete(prompt, generation_config)
+    return output, length
 
 
 def infer_multi(prompt_template, inputs_df, generation_config=None, progress=None):
     props = (i / len(inputs_df) for i in range(1, len(inputs_df) + 1))
 
     def infer_with_progress(inputs):
-        output = infer(prompt_template, inputs.to_dict(), generation_config)
+        output, length = infer(prompt_template, inputs.to_dict(), generation_config)
         if progress is not None:
             progress.progress(next(props))
-        return output
+        return output, length
 
-    return inputs_df.apply(infer_with_progress, axis=1)
+    return zip(*inputs_df.apply(infer_with_progress, axis=1))
 
 
 def preprocess_output_line(text):
@@ -236,7 +242,7 @@ def canonize_label(output, annotation_labels, search_row):
         return UNKNOWN_LABEL
 
 
-def measure(dataset, outputs, search_row):
+def measure(dataset, outputs, lengths, search_row):
     inferences = [
         canonize_label(output, st.session_state.labels, search_row)
         for output in outputs
@@ -256,6 +262,9 @@ def measure(dataset, outputs, search_row):
             "output": outputs,
         }
         | dataset[st.session_state.input_columns].to_dict("list")
+        | {
+            "length": lengths,
+        }
     )
 
     acc = accuracy_score(evaluation_df["annotation"], evaluation_df["inference"])
@@ -284,13 +293,15 @@ def measure(dataset, outputs, search_row):
 def run_evaluation(
     prompt_template, dataset, search_row, generation_config=None, progress=None
 ):
-    outputs = infer_multi(
+    inputs_df = dataset[st.session_state.input_columns]
+    outputs, lengths = infer_multi(
         prompt_template,
-        dataset[st.session_state.input_columns],
+        inputs_df,
         generation_config,
         progress,
     )
-    metrics = measure(dataset, outputs, search_row)
+
+    metrics = measure(dataset, outputs, lengths, search_row)
     return metrics
 
 
@@ -438,6 +449,9 @@ with st.sidebar:
             LOGGER.warning(f"FORM {model=}")
             LOGGER.warning(f"FORM {generation_config=}")
 
+    with st.expander("Info"):
+        st.write(model_info(model).cardData)
+        # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
 
 tab1, tab2, tab3 = st.tabs(["Evaluation", "Training Dataset", "Playground"])
 
