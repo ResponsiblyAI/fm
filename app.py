@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from datasets import load_dataset
+from datasets.tasks.text_classification import ClassLabel
 from huggingface_hub import InferenceClient
 from huggingface_hub.utils import HfHubHTTPError
 from sklearn.metrics import ConfusionMatrixDisplay, accuracy_score, confusion_matrix
@@ -18,14 +19,11 @@ TITLE = "Prompter"
 
 HF_MODEL = st.secrets.get("hf_model")
 
-HF_DATASET = "amazon_polarity"
+HF_DATASET = st.secrets.get("hf_dataset")
 
 DATASET_SHUFFLE_SEED = 42
 NUM_SAMPLES = 25
 PROMPT_TEXT_HEIGHT = 300
-
-TEXT_COLUMN = "content"
-ANNOTATION_COLUMN = "label"
 
 UNKNOWN_LABEL = "Unknown"
 
@@ -80,7 +78,7 @@ GENERATION_CONFIG_DEFAULTS = {
     key: value["DEFAULT"] for key, value in GENERATION_CONFIG_PARAMS.items()
 }
 
-STARTER_PROMPT = """{text}
+STARTER_PROMPT = """{content}
 
 The sentiment of the text is"""
 
@@ -94,26 +92,41 @@ def normalize(text):
 
 
 def prepare_datasets():
-    label_dict = {0: normalize("negative"), 1: normalize("positive")}
+    ds = load_dataset(HF_DATASET)
+
+    label_columns = [
+        (name, info)
+        for name, info in ds["train"].features.items()
+        if isinstance(info, ClassLabel)
+    ]
+    assert len(label_columns) == 1
+    label_column, label_column_info = label_columns[0]
+    labels = [normalize(label) for label in label_column_info.names]
+    label_dict = dict(enumerate(labels))
+    input_columns = [name for name in ds["train"].features if name != label_column]
 
     def load(split):
-        df = (
-            load_dataset(HF_DATASET, split=split)
-            .shuffle(seed=DATASET_SHUFFLE_SEED)
-            .select(range(NUM_SAMPLES))
-            .to_pandas()
-        )
+        ds_split = ds[split]
 
-        df["content"] = df["content"].apply(strip_newline_space)
-        df["label"].replace(label_dict, inplace=True)
-        df.drop(columns=["title"], inplace=True)
+        if split == "train":
+            ds_split = ds_split.shuffle(seed=DATASET_SHUFFLE_SEED).select(
+                range(NUM_SAMPLES)
+            )
+
+        df = ds_split.to_pandas()
+
+        for input_column in input_columns:
+            df[input_column] = df[input_column].apply(strip_newline_space)
+
+        df[label_column] = df[label_column].replace(label_dict)
 
         return df
 
-    return (load(split) for split in ("train", "test"))
+    # (load(split) for split in ("train",))
+    return (load("train"), input_columns, label_column, labels)
 
 
-def complete(prompt, generation_config):
+def complete(prompt, generation_config, details=False):
     if generation_config is None:
         generation_config = {}
 
@@ -144,13 +157,13 @@ def complete(prompt, generation_config):
             else:
                 assert generation_config["do_sample"]
 
-    LOGGER.warning(f"API Call {generation_config=}")
+    LOGGER.warning(f"API Call\n\n``{prompt}``\n\n{generation_config=}")
     response = st.session_state.client.text_generation(
-        prompt, stream=False, details=True, **generation_config
+        prompt, stream=False, details=details, **generation_config
     )
     LOGGER.debug(response)
 
-    output = response.generated_text
+    output = response.generated_text if details else response
 
     # Remove stop sequences from the output
     # Inspired by
@@ -170,22 +183,22 @@ def complete(prompt, generation_config):
     return output
 
 
-def infer(prompt_template, text, generation_config=None):
-    prompt = prompt_template.format(text=text)
+def infer(prompt_template, inputs, generation_config=None):
+    prompt = prompt_template.format(**inputs)
     output = complete(prompt, generation_config)
     return output
 
 
-def infer_multi(prompt_template, text_series, generation_config=None, progress=None):
-    props = (i / len(text_series) for i in range(1, len(text_series) + 1))
+def infer_multi(prompt_template, inputs_df, generation_config=None, progress=None):
+    props = (i / len(inputs_df) for i in range(1, len(inputs_df) + 1))
 
-    def infer_with_progress(text):
-        output = infer(prompt_template, text, generation_config)
+    def infer_with_progress(inputs):
+        output = infer(prompt_template, inputs.to_dict(), generation_config)
         if progress is not None:
             progress.progress(next(props))
         return output
 
-    return text_series.apply(infer_with_progress)
+    return inputs_df.apply(infer_with_progress, axis=1)
 
 
 def preprocess_output_line(text):
@@ -221,34 +234,33 @@ def canonize_label(output, annotation_labels, search_row):
 
 
 def measure(dataset, outputs, search_row):
-    annotation_labels = sorted(dataset[ANNOTATION_COLUMN].unique())
-
     inferences = [
-        canonize_label(output, annotation_labels, search_row) for output in outputs
+        canonize_label(output, st.session_state.labels, search_row)
+        for output in outputs
     ]
 
-    inference_labels = annotation_labels.copy() + [UNKNOWN_LABEL]
+    print(f"{inferences=}")
+    print(f"{st.session_state.labels=}")
+    inference_labels = st.session_state.labels + [UNKNOWN_LABEL]
 
     evaluation_df = pd.DataFrame(
         {
             "hit/miss": np.where(
-                dataset[ANNOTATION_COLUMN] == inferences, "hit", "miss"
+                dataset[st.session_state.label_column] == inferences, "hit", "miss"
             ),
-            "annotation": dataset[ANNOTATION_COLUMN],
+            "annotation": dataset[st.session_state.label_column],
             "inference": inferences,
             "output": outputs,
-            "text": dataset[TEXT_COLUMN],
         }
+        | dataset[st.session_state.input_columns].to_dict("list")
     )
-
-    all_labels = sorted(set(annotation_labels + inference_labels))
 
     acc = accuracy_score(evaluation_df["annotation"], evaluation_df["inference"])
     cm = confusion_matrix(
-        evaluation_df["annotation"], evaluation_df["inference"], labels=all_labels
+        evaluation_df["annotation"], evaluation_df["inference"], labels=inference_labels
     )
 
-    cm_display = ConfusionMatrixDisplay(cm, display_labels=all_labels)
+    cm_display = ConfusionMatrixDisplay(cm, display_labels=inference_labels)
     cm_display.plot()
     cm_display.ax_.set_xlabel("inference Labels")
     cm_display.ax_.set_ylabel("Annotation Labels")
@@ -259,7 +271,7 @@ def measure(dataset, outputs, search_row):
         "confusion_matrix": cm,
         "confusion_matrix_display": cm_display.figure_,
         "hit_miss": evaluation_df,
-        "annotation_labels": annotation_labels,
+        "annotation_labels": st.session_state.labels,
         "inference_labels": inference_labels,
     }
 
@@ -270,7 +282,10 @@ def run_evaluation(
     prompt_template, dataset, search_row, generation_config=None, progress=None
 ):
     outputs = infer_multi(
-        prompt_template, dataset[TEXT_COLUMN], generation_config, progress
+        prompt_template,
+        dataset[st.session_state.input_columns],
+        generation_config,
+        progress,
     )
     metrics = measure(dataset, outputs, search_row)
     return metrics
@@ -291,8 +306,12 @@ if "tokenizer" not in st.session_state:
 if "train_dataset" not in st.session_state or "test_dataset" not in st.session_state:
     (
         st.session_state["train_dataset"],
-        st.session_state["test_dataset"],
+        # st.session_state["test_dataset"],
+        st.session_state["input_columns"],
+        st.session_state["label_column"],
+        st.session_state["labels"],
     ) = prepare_datasets()
+    st.session_state["test_dataset"] = st.session_state["train_dataset"]
 
 if "generation_config" not in st.session_state:
     st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
@@ -368,7 +387,7 @@ with st.sidebar:
                     value != GENERATION_CONFIG_DEFAULTS[name]
                     for name, value in generation_confing_slider_sampling.items()
                 )
-                and not generation_config["do_sample"]
+                and not do_sample
             ):
                 sampling_slider_default_values_info = " | ".join(
                     f"{name}={GENERATION_CONFIG_DEFAULTS[name]}"
@@ -379,14 +398,14 @@ with st.sidebar:
                 )
                 st.stop()
 
-            if seed is not None and not generation_config["do_sample"]:
+            if seed is not None and not do_sample:
                 st.error(
                     "Sampling must be enabled to use a seed. Otherwise, the seed field should be empty."
                 )
                 st.stop()
 
             generation_config = generation_config_sliders | dict(
-                stop_sequences=stop_sequences, seed=seed
+                do_sample=do_sample, stop_sequences=stop_sequences, seed=seed
             )
 
             st.session_state["client"] = InferenceClient(
@@ -406,6 +425,9 @@ with tab1:
             "Prompt Template", STARTER_PROMPT, height=PROMPT_TEXT_HEIGHT
         )
 
+        st.write(f"Labels: {combine_labels(st.session_state.labels)}")
+        st.write(f"Inputs: {combine_labels(st.session_state.input_columns)}")
+
         col1, col2 = st.columns(2)
 
         with col1:
@@ -422,12 +444,12 @@ with tab1:
                 st.stop()
 
             _, formats, *_ = zip(*string.Formatter().parse(prompt_template))
-            is_valid_prompt_template = set(formats) == {"text"} or set(formats) == {
-                "text",
-                None,
-            }
+            is_valid_prompt_template = set(formats).issubset(
+                {None} | set(st.session_state.input_columns)
+            )
+
             if not is_valid_prompt_template:
-                st.error("Prompt template must contain a single {text} field.")
+                st.error("Prompt template must contain some or all inputs fields.")
                 st.stop()
 
             inference_progress = st.progress(0, "Executing inference")
