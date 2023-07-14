@@ -17,9 +17,9 @@ LOGGER = logging.getLogger(__name__)
 
 TITLE = "Prompter"
 
-HF_MODEL = st.secrets.get("hf_model")
+HF_MODEL = st.secrets.get("hf_model", "")
 
-HF_DATASET = st.secrets.get("hf_dataset")
+HF_DATASET = st.secrets.get("hf_dataset", "")
 
 DATASET_SPLIT_SEED = 42
 TRAIN_SIZE = 20
@@ -72,7 +72,7 @@ GENERATION_CONFIG_PARAMS = {
     },
     "stop_sequences": {
         "NAME": "Stop Sequences",
-        "DEFAULT": [r"\nUser:", r"<|endoftext|>"],
+        "DEFAULT": [r"\nUser:", r"<|endoftext|>", r"\n### Human:", r"\n### User:"],
         "SAMPLING": False,
     },
 }
@@ -80,10 +80,6 @@ GENERATION_CONFIG_PARAMS = {
 GENERATION_CONFIG_DEFAULTS = {
     key: value["DEFAULT"] for key, value in GENERATION_CONFIG_PARAMS.items()
 }
-
-STARTER_PROMPT = """{content}
-
-The sentiment of the text is"""
 
 
 def strip_newline_space(text):
@@ -195,17 +191,19 @@ def complete(prompt, generation_config, details=True):
 def infer(prompt_template, inputs, generation_config=None):
     prompt = prompt_template.format(**inputs)
     output, length = complete(prompt, generation_config)
-    return output, length
+    return output, prompt, length
 
 
 def infer_multi(prompt_template, inputs_df, generation_config=None, progress=None):
     props = (i / len(inputs_df) for i in range(1, len(inputs_df) + 1))
 
     def infer_with_progress(inputs):
-        output, length = infer(prompt_template, inputs.to_dict(), generation_config)
+        output, prompt, length = infer(
+            prompt_template, inputs.to_dict(), generation_config
+        )
         if progress is not None:
             progress.progress(next(props))
-        return output, length
+        return output, prompt, length
 
     return zip(*inputs_df.apply(infer_with_progress, axis=1))
 
@@ -242,7 +240,7 @@ def canonize_label(output, annotation_labels, search_row):
         return UNKNOWN_LABEL
 
 
-def measure(dataset, outputs, lengths, search_row):
+def measure(dataset, outputs, search_row):
     inferences = [
         canonize_label(output, st.session_state.labels, search_row)
         for output in outputs
@@ -262,9 +260,6 @@ def measure(dataset, outputs, lengths, search_row):
             "output": outputs,
         }
         | dataset[st.session_state.input_columns].to_dict("list")
-        | {
-            "length": lengths,
-        }
     )
 
     acc = accuracy_score(evaluation_df["annotation"], evaluation_df["inference"])
@@ -294,14 +289,18 @@ def run_evaluation(
     prompt_template, dataset, search_row, generation_config=None, progress=None
 ):
     inputs_df = dataset[st.session_state.input_columns]
-    outputs, lengths = infer_multi(
+    outputs, prompts, lengths = infer_multi(
         prompt_template,
         inputs_df,
         generation_config,
         progress,
     )
 
-    metrics = measure(dataset, outputs, lengths, search_row)
+    metrics = measure(dataset, outputs, search_row)
+
+    metrics["hit_miss"]["prompt"] = prompts
+    metrics["hit_miss"]["length"] = lengths
+
     return metrics
 
 
@@ -311,7 +310,7 @@ def combine_labels(labels):
 
 if "client" not in st.session_state:
     st.session_state["client"] = InferenceClient(
-        token=st.secrets.get("hf_token"), model=HF_MODEL
+        token=st.secrets.get("hf_token", None), model=HF_MODEL
     )
 
 if "processing_tokenizer" not in st.session_state:
@@ -430,7 +429,7 @@ with st.sidebar:
             )
 
             st.session_state["client"] = InferenceClient(
-                token=st.secrets.get("hf_token"), model=model
+                token=st.secrets.get("hf_token", None), model=model
             )
 
             st.session_state["generation_config"] = generation_config
@@ -461,9 +460,7 @@ tab1, tab2, tab3 = st.tabs(["Evaluation", "Training Dataset", "Playground"])
 
 with tab1:
     with st.form("prompt_form"):
-        prompt_template = st.text_area(
-            "Prompt Template", STARTER_PROMPT, height=PROMPT_TEXT_HEIGHT
-        )
+        prompt_template = st.text_area("Prompt Template", height=PROMPT_TEXT_HEIGHT)
 
         st.write(f"Labels: {combine_labels(st.session_state.labels)}")
         st.write(f"Inputs: {combine_labels(st.session_state.input_columns)}")
@@ -489,7 +486,7 @@ with tab1:
             )
 
             if not is_valid_prompt_template:
-                st.error("Prompt template must contain some or all inputs fields.")
+                st.error(f"The prompt template contains unrecognized fields.")
                 st.stop()
 
             inference_progress = st.progress(0, "Executing inference")
