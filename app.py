@@ -451,8 +451,9 @@ with st.sidebar:
     with st.expander("Info"):
         st.caption("Dataset")
         st.write(dataset_info(dataset).cardData)
-        st.caption("Model")
-        st.write(model_info(model).cardData)
+        if "http" not in model:
+            st.caption("Model")
+            st.write(model_info(model).cardData)
 
         # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
 
