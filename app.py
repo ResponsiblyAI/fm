@@ -72,7 +72,7 @@ GENERATION_CONFIG_PARAMS = {
     },
     "stop_sequences": {
         "NAME": "Stop Sequences",
-        "DEFAULT": [r"\nUser:", r"<|endoftext|>", r"\n### Human:", r"\n### User:"],
+        "DEFAULT": [r"<|endoftext|>", r"\nUser:", r"\n### User:", r"\n### Human:"],
         "SAMPLING": False,
     },
 }
