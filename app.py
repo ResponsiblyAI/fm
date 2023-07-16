@@ -123,7 +123,8 @@ def prepare_datasets(dataset_name):
     input_columns = []
     for input_column in original_input_columns:
         lowered_input_column = input_column.lower()
-        ds = ds.rename_column(input_column, lowered_input_column)
+        if input_column != lowered_input_column:
+            ds = ds.rename_column(input_column, lowered_input_column)
         input_columns.append(lowered_input_column)
 
     ds = ds["train"].train_test_split(
