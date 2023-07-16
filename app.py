@@ -22,8 +22,8 @@ HF_MODEL = st.secrets.get("hf_model", "")
 HF_DATASET = st.secrets.get("hf_dataset", "")
 
 DATASET_SPLIT_SEED = 42
-TRAIN_SIZE = 20
-TEST_SIZE = 50
+TRAIN_SIZE = 10
+TEST_SIZE = 25
 SPLITS = ["train", "test"]
 
 PROMPT_TEXT_HEIGHT = 300
@@ -72,7 +72,7 @@ GENERATION_CONFIG_PARAMS = {
     },
     "stop_sequences": {
         "NAME": "Stop Sequences",
-        "DEFAULT": [r"<|endoftext|>", r"\nUser:", r"\n### User:", r"\n### Human:"],
+        "DEFAULT": st.secrets.get("stop_sequences", "").split(),
         "SAMPLING": False,
     },
 }
@@ -91,7 +91,12 @@ def normalize(text):
 
 
 def prepare_datasets(dataset_name):
-    ds = load_dataset(dataset_name)
+    try:
+        ds = load_dataset(dataset_name)
+    except FileNotFoundError as e:
+        assert "/" in dataset_name
+        dataset_name, subset_name = dataset_name.rsplit("/", 1)
+        ds = load_dataset(dataset_name, subset_name)
 
     label_columns = [
         (name, info)
@@ -102,7 +107,11 @@ def prepare_datasets(dataset_name):
     label_column, label_column_info = label_columns[0]
     labels = [normalize(label) for label in label_column_info.names]
     label_dict = dict(enumerate(labels))
-    input_columns = [name for name in ds["train"].features if name != label_column]
+    input_columns = [
+        name
+        for name, info in ds["train"].features.items()
+        if not isinstance(info, ClassLabel) and info.dtype == "string"
+    ]
 
     ds = ds["train"].train_test_split(
         train_size=TRAIN_SIZE, test_size=TEST_SIZE, seed=DATASET_SPLIT_SEED
@@ -110,7 +119,7 @@ def prepare_datasets(dataset_name):
 
     dfs = {}
 
-    for split in ["train", "test"]:
+    for split in SPLITS:
         ds_split = ds[split]
 
         df = ds_split.to_pandas()
@@ -122,7 +131,7 @@ def prepare_datasets(dataset_name):
 
         dfs[split] = df
 
-    return dfs, input_columns, label_column, labels
+    return dataset_name, dfs, input_columns, label_column, labels
 
 
 def complete(prompt, generation_config, details=True):
@@ -316,8 +325,9 @@ if "client" not in st.session_state:
 if "processing_tokenizer" not in st.session_state:
     st.session_state["processing_tokenizer"] = English().tokenizer
 
-if "train_dataset" not in st.session_state or "test_dataset" not in st.session_state:
+if "train_dataset" not in st.session_state:
     (
+        st.session_state["dataset_name"],
         splits_df,
         st.session_state["input_columns"],
         st.session_state["label_column"],
@@ -435,6 +445,7 @@ with st.sidebar:
             st.session_state["generation_config"] = generation_config
 
             (
+                st.session_state["dataset_name"],
                 splits_df,
                 st.session_state["input_columns"],
                 st.session_state["label_column"],
@@ -450,7 +461,7 @@ with st.sidebar:
 
     with st.expander("Info"):
         st.caption("Dataset")
-        st.write(dataset_info(dataset).cardData)
+        st.write(dataset_info(st.session_state.dataset_name).cardData)
         if "http" not in model:
             st.caption("Model")
             st.write(model_info(model).cardData)
