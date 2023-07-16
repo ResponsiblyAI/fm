@@ -107,6 +107,12 @@ def prepare_datasets(dataset_name):
     label_column, label_column_info = label_columns[0]
     labels = [normalize(label) for label in label_column_info.names]
     label_dict = dict(enumerate(labels))
+
+    if any(len(st.session_state.processing_tokenizer(label)) > 1 for label in labels):
+        st.error(
+            "Labels are not single words. "
+            "Matching labels won't not work as expected."
+        )
     
     original_input_columns = [
         name
