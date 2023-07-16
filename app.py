@@ -107,11 +107,18 @@ def prepare_datasets(dataset_name):
     label_column, label_column_info = label_columns[0]
     labels = [normalize(label) for label in label_column_info.names]
     label_dict = dict(enumerate(labels))
-    input_columns = [
+    
+    original_input_columns = [
         name
         for name, info in ds["train"].features.items()
         if not isinstance(info, ClassLabel) and info.dtype == "string"
     ]
+
+    input_columns = []
+    for input_column in original_input_columns:
+        lowered_input_column = input_column.lower()
+        ds = ds.rename_column(input_column, lowered_input_column)
+        input_columns.append(lowered_input_column)
 
     ds = ds["train"].train_test_split(
         train_size=TRAIN_SIZE, test_size=TEST_SIZE, seed=DATASET_SPLIT_SEED
