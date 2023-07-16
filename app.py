@@ -27,7 +27,7 @@ HF_MODEL = st.secrets.get("hf_model", "")
 
 HF_DATASET = st.secrets.get("hf_dataset", "")
 
-DATASET_SPLIT_SEED = 42
+DATASET_SPLIT_SEED_DEFAULT = 42
 TRAIN_SIZE = 10
 TEST_SIZE = 25
 SPLITS = ["train", "test"]
@@ -96,7 +96,7 @@ def normalize(text):
     return strip_newline_space(text).lower().capitalize()
 
 
-def prepare_datasets(dataset_name):
+def prepare_datasets(dataset_name, dataset_split_seed=None):
     try:
         ds = load_dataset(dataset_name)
     except FileNotFoundError as e:
@@ -138,7 +138,7 @@ def prepare_datasets(dataset_name):
         input_columns.append(lowered_input_column)
 
     ds = ds["train"].train_test_split(
-        train_size=TRAIN_SIZE, test_size=TEST_SIZE, seed=DATASET_SPLIT_SEED
+        train_size=TRAIN_SIZE, test_size=TEST_SIZE, seed=dataset_split_seed
     )
 
     dfs = {}
@@ -350,6 +350,9 @@ def combine_labels(labels):
     return "|".join(f"``{label}``" for label in labels)
 
 
+if "dataset_split_seed" not in st.session_state:
+    st.session_state["dataset_split_seed"] = DATASET_SPLIT_SEED_DEFAULT
+
 if "client" not in st.session_state:
     st.session_state["client"] = InferenceClient(
         token=st.secrets.get("hf_token", None), model=HF_MODEL
@@ -365,13 +368,14 @@ if "train_dataset" not in st.session_state:
         st.session_state["input_columns"],
         st.session_state["label_column"],
         st.session_state["labels"],
-    ) = prepare_datasets(HF_DATASET)
+    ) = prepare_datasets(HF_DATASET, st.session_state["dataset_split_seed"])
 
     for split in splits_df:
         st.session_state[f"{split}_dataset"] = splits_df[split]
 
 if "generation_config" not in st.session_state:
     st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
+
 
 st.set_page_config(page_title=TITLE, initial_sidebar_state="collapsed")
 
@@ -419,7 +423,11 @@ with st.sidebar:
         if not stop_sequences:
             stop_sequences = None
 
-        seed = st.text_input("Seed").strip()
+        decoding_seed = st.text_input("Decoding Seed").strip()
+
+        dataset_split_seed = st.text_input(
+            "Dataset Split Seed", st.session_state["dataset_split_seed"]
+        ).strip()
 
         submitted = st.form_submit_button("Set")
 
@@ -432,10 +440,10 @@ with st.sidebar:
                 st.error("Model must be specified.")
                 st.stop()
 
-            if not seed:
-                seed = None
+            if not decoding_seed:
+                decoding_seed = None
             elif seed.isnumeric():
-                seed = int(seed)
+                decoding_seed = int(seed)
             else:
                 st.error("Seed must be numeric or empty.")
                 st.stop()
@@ -461,15 +469,25 @@ with st.sidebar:
                 )
                 st.stop()
 
-            if seed is not None and not do_sample:
+            if decoding_seed is not None and not do_sample:
                 st.error(
-                    "Sampling must be enabled to use a seed. Otherwise, the seed field should be empty."
+                    "Sampling must be enabled to use a decoding seed. Otherwise, the seed field should be empty."
                 )
                 st.stop()
 
+            if not dataset_split_seed:
+                dataset_split_seed = None
+            elif dataset_split_seed.isnumeric():
+                dataset_split_seed = int(dataset_split_seed)
+            else:
+                st.error("Dataset split seed must be numeric or empty.")
+                st.stop()
+
             generation_config = generation_config_sliders | dict(
-                do_sample=do_sample, stop_sequences=stop_sequences, seed=seed
+                do_sample=do_sample, stop_sequences=stop_sequences, seed=decoding_seed
             )
+
+            st.session_state["dataset_split_seed"] = dataset_split_seed
 
             st.session_state["client"] = InferenceClient(
                 token=st.secrets.get("hf_token", None), model=model
