@@ -10,7 +10,13 @@ from datasets import load_dataset
 from datasets.tasks.text_classification import ClassLabel
 from huggingface_hub import InferenceClient, model_info, dataset_info
 from huggingface_hub.utils import HfHubHTTPError
-from sklearn.metrics import ConfusionMatrixDisplay, accuracy_score, confusion_matrix
+from sklearn.metrics import (
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    balanced_accuracy_score,
+    matthews_corrcoef,
+)
 from spacy.lang.en import English
 
 LOGGER = logging.getLogger(__name__)
@@ -61,7 +67,7 @@ GENERATION_CONFIG_PARAMS = {
     "max_new_tokens": {
         "NAME": "Max New Tokens",
         "START": 16,
-        "END": 256,
+        "END": 1024,
         "DEFAULT": 16,
         "STEP": 16,
         "SAMPLING": False,
@@ -94,9 +100,13 @@ def prepare_datasets(dataset_name):
     try:
         ds = load_dataset(dataset_name)
     except FileNotFoundError as e:
-        assert "/" in dataset_name
-        dataset_name, subset_name = dataset_name.rsplit("/", 1)
-        ds = load_dataset(dataset_name, subset_name)
+        try:
+            assert "/" in dataset_name
+            dataset_name, subset_name = dataset_name.rsplit("/", 1)
+            ds = load_dataset(dataset_name, subset_name)
+        except (FileNotFoundError, AssertionError):
+            st.error(f"Dataset `{dataset_name}` not found.")
+            st.stop()
 
     label_columns = [
         (name, info)
@@ -272,8 +282,8 @@ def measure(dataset, outputs, search_row):
         for output in outputs
     ]
 
-    print(f"{inferences=}")
-    print(f"{st.session_state.labels=}")
+    LOGGER.warning(f"{inferences=}")
+    LOGGER.warning(f"{st.session_state.labels=}")
     inference_labels = st.session_state.labels + [UNKNOWN_LABEL]
 
     evaluation_df = pd.DataFrame(
@@ -289,6 +299,10 @@ def measure(dataset, outputs, search_row):
     )
 
     acc = accuracy_score(evaluation_df["annotation"], evaluation_df["inference"])
+    bacc = balanced_accuracy_score(
+        evaluation_df["annotation"], evaluation_df["inference"]
+    )
+    mcc = matthews_corrcoef(evaluation_df["annotation"], evaluation_df["inference"])
     cm = confusion_matrix(
         evaluation_df["annotation"], evaluation_df["inference"], labels=inference_labels
     )
@@ -301,6 +315,8 @@ def measure(dataset, outputs, search_row):
 
     metrics = {
         "accuracy": acc,
+        "balanced_accuracy": bacc,
+        "mcc": mcc,
         "confusion_matrix": cm,
         "confusion_matrix_display": cm_display.figure_,
         "hit_miss": evaluation_df,
@@ -532,7 +548,15 @@ with tab1:
                 st.error(e)
                 st.stop()
 
-            st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
+            with col2:
+                st.metric(
+                    "Balanced Accuracy", f"{100 * evaluation['balanced_accuracy']:.0f}%"
+                )
+            with col3:
+                st.metric("MCC", f"{evaluation['mcc']:.2f}")
 
             st.markdown("## Confusion Matrix")
             st.pyplot(evaluation["confusion_matrix_display"])
