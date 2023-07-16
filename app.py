@@ -231,6 +231,9 @@ def preprocess_output_line(text):
 # https://help.openai.com/en/articles/6272941-classifications-transition-guide#h_e63b71a5c8
 # Here we take the label from either the *first* or *last* (for CoT) line of the output
 # This is not very robust, but it's a start that doesn't requires asking for a structured output such as JSON
+# HELM has more robust processing options, we are not using them, but these are the references:
+# https://github.com/stanford-crfm/helm/blob/04a75826ce75835f6d22a7d41ae1487104797964/src/helm/benchmark/metrics/classification_metrics.py
+# https://github.com/stanford-crfm/helm/blob/04a75826ce75835f6d22a7d41ae1487104797964/src/helm/benchmark/metrics/basic_metrics.py
 def canonize_label(output, annotation_labels, search_row):
     assert search_row in SEARCH_ROW_DICT.keys()
 
