@@ -232,9 +232,9 @@ def infer_multi(prompt_template, inputs_df, generation_config=None, progress=Non
 
 def preprocess_output_line(text):
     return [
-        normalized_token
+        normalize(token_str)
         for token in st.session_state.processing_tokenizer(text)
-        if (normalized_token := normalize(str(token)))
+        if (token_str := str(token))
     ]
 
 
