@@ -163,6 +163,8 @@ def prepare_datasets(
         df[input_column] = df[input_column].apply(strip_newline_space)
     df[label_column] = df[label_column].replace(label_dict)
 
+    df = df[[label_column] + input_columns]
+
     if train_size is not None and test_size is not None:
         undersample = RandomUnderSampler(
             sampling_strategy="not minority", random_state=dataset_split_seed
