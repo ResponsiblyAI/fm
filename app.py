@@ -8,15 +8,17 @@ import pandas as pd
 import streamlit as st
 from datasets import load_dataset
 from datasets.tasks.text_classification import ClassLabel
-from huggingface_hub import InferenceClient, model_info, dataset_info
+from huggingface_hub import InferenceClient, dataset_info, model_info
 from huggingface_hub.utils import HfHubHTTPError
+from imblearn.under_sampling import RandomUnderSampler
 from sklearn.metrics import (
-    confusion_matrix,
     ConfusionMatrixDisplay,
     accuracy_score,
     balanced_accuracy_score,
+    confusion_matrix,
     matthews_corrcoef,
 )
+from sklearn.model_selection import StratifiedShuffleSplit
 from spacy.lang.en import English
 
 LOGGER = logging.getLogger(__name__)
@@ -31,6 +33,7 @@ DATASET_SPLIT_SEED_DEFAULT = 42
 TRAIN_SIZE = 10
 TEST_SIZE = 25
 SPLITS = ["train", "test"]
+STRATIFY = True
 
 PROMPT_TEXT_HEIGHT = 300
 
@@ -88,6 +91,17 @@ GENERATION_CONFIG_DEFAULTS = {
 }
 
 
+st.set_page_config(page_title=TITLE, initial_sidebar_state="collapsed")
+
+
+@st.cache_data
+def get_processing_tokenizer():
+    return English().tokenizer
+
+
+PROCESSING_TOKENIZER = get_processing_tokenizer()
+
+
 def strip_newline_space(text):
     return text.strip("\n").strip()
 
@@ -96,7 +110,14 @@ def normalize(text):
     return strip_newline_space(text).lower().capitalize()
 
 
-def prepare_datasets(dataset_name, dataset_split_seed=None):
+def prepare_datasets(
+    dataset_name,
+    take_split="train",
+    train_size=TRAIN_SIZE,
+    test_size=TEST_SIZE,
+    stratify=STRATIFY,
+    dataset_split_seed=None,
+):
     try:
         ds = load_dataset(dataset_name)
     except FileNotFoundError as e:
@@ -118,7 +139,7 @@ def prepare_datasets(dataset_name, dataset_split_seed=None):
     labels = [normalize(label) for label in label_column_info.names]
     label_dict = dict(enumerate(labels))
 
-    if any(len(st.session_state.processing_tokenizer(label)) > 1 for label in labels):
+    if any(len(PROCESSING_TOKENIZER(label)) > 1 for label in labels):
         st.error(
             "Labels are not single words. "
             "Matching labels won't not work as expected."
@@ -137,28 +158,36 @@ def prepare_datasets(dataset_name, dataset_split_seed=None):
             ds = ds.rename_column(input_column, lowered_input_column)
         input_columns.append(lowered_input_column)
 
-    ds = ds["train"].train_test_split(
-        train_size=TRAIN_SIZE, test_size=TEST_SIZE, seed=dataset_split_seed
-    )
+    df = ds[take_split].to_pandas()
+    for input_column in input_columns:
+        df[input_column] = df[input_column].apply(strip_newline_space)
+    df[label_column] = df[label_column].replace(label_dict)
 
-    dfs = {}
+    if train_size is not None and test_size is not None:
+        undersample = RandomUnderSampler(
+            sampling_strategy="not minority", random_state=dataset_split_seed
+        )
+        df, df[label_column] = undersample.fit_resample(df, df[label_column])
+        sss = StratifiedShuffleSplit(
+            n_splits=1,
+            train_size=train_size,
+            test_size=test_size,
+            random_state=dataset_split_seed,
+        )
+        train_index, test_index = next(iter(sss.split(df, df[label_column])))
 
-    for split in SPLITS:
-        ds_split = ds[split]
+        train_df = df.iloc[train_index]
+        test_df = df.iloc[test_index]
 
-        df = ds_split.to_pandas()
+        dfs = {"train": train_df, "test": test_df}
 
-        for input_column in input_columns:
-            df[input_column] = df[input_column].apply(strip_newline_space)
-
-        df[label_column] = df[label_column].replace(label_dict)
-
-        dfs[split] = df
+    else:
+        dfs = {take_split: df}
 
     return dataset_name, dfs, input_columns, label_column, labels
 
 
-def complete(prompt, generation_config, details=True):
+def complete(client, prompt, generation_config, details=True):
     if generation_config is None:
         generation_config = {}
 
@@ -190,7 +219,7 @@ def complete(prompt, generation_config, details=True):
                 assert generation_config["do_sample"]
 
     LOGGER.warning(f"API Call\n\n``{prompt}``\n\n{generation_config=}")
-    response = st.session_state.client.text_generation(
+    response = client.text_generation(
         prompt, stream=False, details=details, **generation_config
     )
     LOGGER.warning(response)
@@ -221,18 +250,20 @@ def complete(prompt, generation_config, details=True):
     return output, length
 
 
-def infer(prompt_template, inputs, generation_config=None):
+def infer(client, prompt_template, inputs, generation_config=None):
     prompt = prompt_template.format(**inputs)
-    output, length = complete(prompt, generation_config)
+    output, length = complete(client, prompt, generation_config)
     return output, prompt, length
 
 
-def infer_multi(prompt_template, inputs_df, generation_config=None, progress=None):
+def infer_multi(
+    client, prompt_template, inputs_df, generation_config=None, progress=None
+):
     props = (i / len(inputs_df) for i in range(1, len(inputs_df) + 1))
 
     def infer_with_progress(inputs):
         output, prompt, length = infer(
-            prompt_template, inputs.to_dict(), generation_config
+            client, prompt_template, inputs.to_dict(), generation_config
         )
         if progress is not None:
             progress.progress(next(props))
@@ -244,7 +275,7 @@ def infer_multi(prompt_template, inputs_df, generation_config=None, progress=Non
 def preprocess_output_line(text):
     return [
         normalize(token_str)
-        for token in st.session_state.processing_tokenizer(text)
+        for token in PROCESSING_TOKENIZER(text)
         if (token_str := str(token))
     ]
 
@@ -276,26 +307,21 @@ def canonize_label(output, annotation_labels, search_row):
         return UNKNOWN_LABEL
 
 
-def measure(dataset, outputs, search_row):
-    inferences = [
-        canonize_label(output, st.session_state.labels, search_row)
-        for output in outputs
-    ]
+def measure(dataset, outputs, labels, label_column, input_columns, search_row):
+    inferences = [canonize_label(output, labels, search_row) for output in outputs]
 
     LOGGER.warning(f"{inferences=}")
-    LOGGER.warning(f"{st.session_state.labels=}")
-    inference_labels = st.session_state.labels + [UNKNOWN_LABEL]
+    LOGGER.warning(f"{labels=}")
+    inference_labels = labels + [UNKNOWN_LABEL]
 
     evaluation_df = pd.DataFrame(
         {
-            "hit/miss": np.where(
-                dataset[st.session_state.label_column] == inferences, "hit", "miss"
-            ),
-            "annotation": dataset[st.session_state.label_column],
+            "hit/miss": np.where(dataset[label_column] == inferences, "hit", "miss"),
+            "annotation": dataset[label_column],
             "inference": inferences,
             "output": outputs,
         }
-        | dataset[st.session_state.input_columns].to_dict("list")
+        | dataset[input_columns].to_dict("list")
     )
 
     acc = accuracy_score(evaluation_df["annotation"], evaluation_df["inference"])
@@ -320,7 +346,7 @@ def measure(dataset, outputs, search_row):
         "confusion_matrix": cm,
         "confusion_matrix_display": cm_display.figure_,
         "hit_miss": evaluation_df,
-        "annotation_labels": st.session_state.labels,
+        "annotation_labels": labels,
         "inference_labels": inference_labels,
     }
 
@@ -328,17 +354,26 @@ def measure(dataset, outputs, search_row):
 
 
 def run_evaluation(
-    prompt_template, dataset, search_row, generation_config=None, progress=None
+    client,
+    prompt_template,
+    dataset,
+    labels,
+    label_column,
+    input_columns,
+    search_row,
+    generation_config=None,
+    progress=None,
 ):
-    inputs_df = dataset[st.session_state.input_columns]
+    inputs_df = dataset[input_columns]
     outputs, prompts, lengths = infer_multi(
+        client,
         prompt_template,
         inputs_df,
         generation_config,
         progress,
     )
 
-    metrics = measure(dataset, outputs, search_row)
+    metrics = measure(dataset, outputs, labels, label_column, input_columns, search_row)
 
     metrics["hit_miss"]["prompt"] = prompts
     metrics["hit_miss"]["length"] = lengths
@@ -350,255 +385,271 @@ def combine_labels(labels):
     return "|".join(f"``{label}``" for label in labels)
 
 
-if "dataset_split_seed" not in st.session_state:
-    st.session_state["dataset_split_seed"] = DATASET_SPLIT_SEED_DEFAULT
+def main():
+    if "dataset_split_seed" not in st.session_state:
+        st.session_state["dataset_split_seed"] = DATASET_SPLIT_SEED_DEFAULT
 
-if "client" not in st.session_state:
-    st.session_state["client"] = InferenceClient(
-        token=st.secrets.get("hf_token", None), model=HF_MODEL
-    )
-
-if "processing_tokenizer" not in st.session_state:
-    st.session_state["processing_tokenizer"] = English().tokenizer
-
-if "train_dataset" not in st.session_state:
-    (
-        st.session_state["dataset_name"],
-        splits_df,
-        st.session_state["input_columns"],
-        st.session_state["label_column"],
-        st.session_state["labels"],
-    ) = prepare_datasets(HF_DATASET, st.session_state["dataset_split_seed"])
-
-    for split in splits_df:
-        st.session_state[f"{split}_dataset"] = splits_df[split]
-
-if "generation_config" not in st.session_state:
-    st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
-
-
-st.set_page_config(page_title=TITLE, initial_sidebar_state="collapsed")
-
-st.title(TITLE)
-
-with st.sidebar:
-    with st.form("model_form"):
-        dataset = st.text_input("Dataset", HF_DATASET).strip()
-
-        model = st.text_input("Model", HF_MODEL).strip()
-
-        # Defautlt values from:
-        # https://huggingface.co/docs/transformers/v4.30.0/main_classes/text_generation
-        # Edges values from:
-        # https://docs.cohere.com/reference/generate
-        # https://platform.openai.com/playground
-
-        generation_config_sliders = {
-            name: st.slider(
-                params["NAME"],
-                params["START"],
-                params["END"],
-                params["DEFAULT"],
-                params["STEP"],
-            )
-            for name, params in GENERATION_CONFIG_PARAMS.items()
-            if "START" in params
-        }
-
-        do_sample = st.checkbox(
-            GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
-            value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
+    if "client" not in st.session_state:
+        st.session_state["client"] = InferenceClient(
+            token=st.secrets.get("hf_token", None), model=HF_MODEL
         )
 
-        stop_sequences = st.text_area(
-            GENERATION_CONFIG_PARAMS["stop_sequences"]["NAME"],
-            value="\n".join(GENERATION_CONFIG_PARAMS["stop_sequences"]["DEFAULT"]),
+    if "train_dataset" not in st.session_state:
+        (
+            st.session_state["dataset_name"],
+            splits_df,
+            st.session_state["input_columns"],
+            st.session_state["label_column"],
+            st.session_state["labels"],
+        ) = prepare_datasets(
+            HF_DATASET, dataset_split_seed=st.session_state["dataset_split_seed"]
         )
 
-        stop_sequences = [
-            clean_stop.encode().decode("unicode_escape")  # interpret \n as newline
-            for stop in stop_sequences.split("\n")
-            if (clean_stop := stop.strip())
-        ]
-        if not stop_sequences:
-            stop_sequences = None
+        for split in splits_df:
+            st.session_state[f"{split}_dataset"] = splits_df[split]
 
-        decoding_seed = st.text_input("Decoding Seed").strip()
+    if "generation_config" not in st.session_state:
+        st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
 
-        dataset_split_seed = st.text_input(
-            "Dataset Split Seed", st.session_state["dataset_split_seed"]
-        ).strip()
+    st.title(TITLE)
 
-        submitted = st.form_submit_button("Set")
+    with st.sidebar:
+        with st.form("model_form"):
+            dataset = st.text_input("Dataset", HF_DATASET).strip()
 
-        if submitted:
-            if not dataset:
-                st.error("Dataset must be specified.")
-                st.stop()
+            model = st.text_input("Model", HF_MODEL).strip()
 
-            if not model:
-                st.error("Model must be specified.")
-                st.stop()
+            # Defautlt values from:
+            # https://huggingface.co/docs/transformers/v4.30.0/main_classes/text_generation
+            # Edges values from:
+            # https://docs.cohere.com/reference/generate
+            # https://platform.openai.com/playground
 
-            if not decoding_seed:
-                decoding_seed = None
-            elif seed.isnumeric():
-                decoding_seed = int(seed)
-            else:
-                st.error("Seed must be numeric or empty.")
-                st.stop()
-
-            generation_confing_slider_sampling = {
-                name: value
-                for name, value in generation_config_sliders.items()
-                if GENERATION_CONFIG_PARAMS[name]["SAMPLING"]
+            generation_config_sliders = {
+                name: st.slider(
+                    params["NAME"],
+                    params["START"],
+                    params["END"],
+                    params["DEFAULT"],
+                    params["STEP"],
+                )
+                for name, params in GENERATION_CONFIG_PARAMS.items()
+                if "START" in params
             }
-            if (
-                any(
-                    value != GENERATION_CONFIG_DEFAULTS[name]
-                    for name, value in generation_confing_slider_sampling.items()
-                )
-                and not do_sample
-            ):
-                sampling_slider_default_values_info = " | ".join(
-                    f"{name}={GENERATION_CONFIG_DEFAULTS[name]}"
-                    for name in generation_confing_slider_sampling
-                )
-                st.error(
-                    f"Sampling must be enabled to use non default values for generation parameters: {sampling_slider_default_values_info}"
-                )
-                st.stop()
 
-            if decoding_seed is not None and not do_sample:
-                st.error(
-                    "Sampling must be enabled to use a decoding seed. Otherwise, the seed field should be empty."
-                )
-                st.stop()
-
-            if not dataset_split_seed:
-                dataset_split_seed = None
-            elif dataset_split_seed.isnumeric():
-                dataset_split_seed = int(dataset_split_seed)
-            else:
-                st.error("Dataset split seed must be numeric or empty.")
-                st.stop()
-
-            generation_config = generation_config_sliders | dict(
-                do_sample=do_sample, stop_sequences=stop_sequences, seed=decoding_seed
+            do_sample = st.checkbox(
+                GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
+                value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
             )
 
-            st.session_state["dataset_split_seed"] = dataset_split_seed
-
-            st.session_state["client"] = InferenceClient(
-                token=st.secrets.get("hf_token", None), model=model
+            stop_sequences = st.text_area(
+                GENERATION_CONFIG_PARAMS["stop_sequences"]["NAME"],
+                value="\n".join(GENERATION_CONFIG_PARAMS["stop_sequences"]["DEFAULT"]),
             )
 
-            st.session_state["generation_config"] = generation_config
+            stop_sequences = [
+                clean_stop.encode().decode("unicode_escape")  # interpret \n as newline
+                for stop in stop_sequences.split("\n")
+                if (clean_stop := stop.strip())
+            ]
+            if not stop_sequences:
+                stop_sequences = None
 
-            (
-                st.session_state["dataset_name"],
-                splits_df,
-                st.session_state["input_columns"],
-                st.session_state["label_column"],
-                st.session_state["labels"],
-            ) = prepare_datasets(dataset)
+            decoding_seed = st.text_input("Decoding Seed").strip()
 
-            for split in splits_df:
-                st.session_state[f"{split}_dataset"] = splits_df[split]
+            dataset_split_seed = st.text_input(
+                "Dataset Split Seed", st.session_state["dataset_split_seed"]
+            ).strip()
 
-            LOGGER.warning(f"FORM {dataset=}")
-            LOGGER.warning(f"FORM {model=}")
-            LOGGER.warning(f"FORM {generation_config=}")
+            stratify = st.checkbox("Stratify", STRATIFY)
 
-    with st.expander("Info"):
-        st.caption("Dataset")
-        st.write(dataset_info(st.session_state.dataset_name).cardData)
-        if "http" not in model:
-            st.caption("Model")
-            st.write(model_info(model).cardData)
+            submitted = st.form_submit_button("Set")
 
-        # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
+            if submitted:
+                if not dataset:
+                    st.error("Dataset must be specified.")
+                    st.stop()
 
-tab1, tab2, tab3 = st.tabs(["Evaluation", "Training Dataset", "Playground"])
+                if not model:
+                    st.error("Model must be specified.")
+                    st.stop()
 
-with tab1:
-    with st.form("prompt_form"):
-        prompt_template = st.text_area("Prompt Template", height=PROMPT_TEXT_HEIGHT)
+                if not decoding_seed:
+                    decoding_seed = None
+                elif seed.isnumeric():
+                    decoding_seed = int(seed)
+                else:
+                    st.error("Seed must be numeric or empty.")
+                    st.stop()
 
-        st.write(f"Labels: {combine_labels(st.session_state.labels)}")
-        st.write(f"Inputs: {combine_labels(st.session_state.input_columns)}")
+                generation_confing_slider_sampling = {
+                    name: value
+                    for name, value in generation_config_sliders.items()
+                    if GENERATION_CONFIG_PARAMS[name]["SAMPLING"]
+                }
+                if (
+                    any(
+                        value != GENERATION_CONFIG_DEFAULTS[name]
+                        for name, value in generation_confing_slider_sampling.items()
+                    )
+                    and not do_sample
+                ):
+                    sampling_slider_default_values_info = " | ".join(
+                        f"{name}={GENERATION_CONFIG_DEFAULTS[name]}"
+                        for name in generation_confing_slider_sampling
+                    )
+                    st.error(
+                        f"Sampling must be enabled to use non default values for generation parameters: {sampling_slider_default_values_info}"
+                    )
+                    st.stop()
 
-        col1, col2 = st.columns(2)
+                if decoding_seed is not None and not do_sample:
+                    st.error(
+                        "Sampling must be enabled to use a decoding seed. Otherwise, the seed field should be empty."
+                    )
+                    st.stop()
 
-        with col1:
-            search_row = st.selectbox(
-                "Search label at which row", list(SEARCH_ROW_DICT)
-            )
+                if not dataset_split_seed:
+                    dataset_split_seed = None
+                elif dataset_split_seed.isnumeric():
+                    dataset_split_seed = int(dataset_split_seed)
+                else:
+                    st.error("Dataset split seed must be numeric or empty.")
+                    st.stop()
 
-        with col2:
-            submitted = st.form_submit_button("Evaluate")
+                generation_config = generation_config_sliders | dict(
+                    do_sample=do_sample,
+                    stop_sequences=stop_sequences,
+                    seed=decoding_seed,
+                )
+
+                st.session_state["dataset_split_seed"] = dataset_split_seed
+
+                st.session_state["client"] = InferenceClient(
+                    token=st.secrets.get("hf_token", None), model=model
+                )
+
+                st.session_state["generation_config"] = generation_config
+
+                (
+                    st.session_state["dataset_name"],
+                    splits_df,
+                    st.session_state["input_columns"],
+                    st.session_state["label_column"],
+                    st.session_state["labels"],
+                ) = prepare_datasets(
+                    dataset,
+                    stratify=stratify,
+                    dataset_split_seed=st.session_state["dataset_split_seed"],
+                )
+
+                for split in splits_df:
+                    st.session_state[f"{split}_dataset"] = splits_df[split]
+
+                LOGGER.warning(f"FORM {dataset=}")
+                LOGGER.warning(f"FORM {model=}")
+                LOGGER.warning(f"FORM {generation_config=}")
+
+        with st.expander("Info"):
+            st.caption("Dataset")
+            st.write(dataset_info(st.session_state.dataset_name).cardData)
+            if "http" not in model:
+                st.caption("Model")
+                st.write(model_info(model).cardData)
+
+            # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
+
+    tab1, tab2, tab3 = st.tabs(["Evaluation", "Training Dataset", "Playground"])
+
+    with tab1:
+        with st.form("prompt_form"):
+            prompt_template = st.text_area("Prompt Template", height=PROMPT_TEXT_HEIGHT)
+
+            st.write(f"Labels: {combine_labels(st.session_state.labels)}")
+            st.write(f"Inputs: {combine_labels(st.session_state.input_columns)}")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                search_row = st.selectbox(
+                    "Search label at which row", list(SEARCH_ROW_DICT)
+                )
+
+            with col2:
+                submitted = st.form_submit_button("Evaluate")
+
+            if submitted:
+                if not prompt_template:
+                    st.error("Prompt template must be specified.")
+                    st.stop()
+
+                _, formats, *_ = zip(*string.Formatter().parse(prompt_template))
+                is_valid_prompt_template = set(formats).issubset(
+                    {None} | set(st.session_state.input_columns)
+                )
+
+                if not is_valid_prompt_template:
+                    st.error(f"The prompt template contains unrecognized fields.")
+                    st.stop()
+
+                inference_progress = st.progress(0, "Executing inference")
+
+                try:
+                    evaluation = run_evaluation(
+                        st.session_state.client,
+                        prompt_template,
+                        st.session_state.test_dataset,
+                        st.session_state.labels,
+                        st.session_state.label_column,
+                        st.session_state.input_columns,
+                        search_row,
+                        st.session_state["generation_config"],
+                        inference_progress,
+                    )
+                except HfHubHTTPError as e:
+                    st.error(e)
+                    st.stop()
+
+                num_metric_cols = 1 if stratify else 3
+                cols = st.columns(num_metric_cols)
+                with cols[0]:
+                    st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
+                if not stratify:
+                    with cols[1]:
+                        st.metric(
+                            "Balanced Accuracy",
+                            f"{100 * evaluation['balanced_accuracy']:.0f}%",
+                        )
+                    with cols[2]:
+                        st.metric("MCC", f"{evaluation['mcc']:.2f}")
+
+                st.markdown("## Confusion Matrix")
+                st.pyplot(evaluation["confusion_matrix_display"])
+
+                st.markdown("## Hits and Misses")
+                st.dataframe(evaluation["hit_miss"])
+
+                if evaluation["accuracy"] == 1:
+                    st.balloons()
+
+    with tab2:
+        st.dataframe(st.session_state.train_dataset)
+
+    with tab3:
+        prompt = st.text_area("Prompt", height=PROMPT_TEXT_HEIGHT)
+
+        submitted = st.button("Complete")
 
         if submitted:
-            if not prompt_template:
-                st.error("Prompt template must be specified.")
+            if not prompt:
+                st.error("Prompt must be specified.")
                 st.stop()
 
-            _, formats, *_ = zip(*string.Formatter().parse(prompt_template))
-            is_valid_prompt_template = set(formats).issubset(
-                {None} | set(st.session_state.input_columns)
-            )
+            with st.spinner("Generating..."):
+                output, _ = complete(prompt, st.session_state["generation_config"])
 
-            if not is_valid_prompt_template:
-                st.error(f"The prompt template contains unrecognized fields.")
-                st.stop()
+            st.text(output)
 
-            inference_progress = st.progress(0, "Executing inference")
 
-            try:
-                evaluation = run_evaluation(
-                    prompt_template,
-                    st.session_state.test_dataset,
-                    search_row,
-                    st.session_state["generation_config"],
-                    inference_progress,
-                )
-            except HfHubHTTPError as e:
-                st.error(e)
-                st.stop()
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
-            with col2:
-                st.metric(
-                    "Balanced Accuracy", f"{100 * evaluation['balanced_accuracy']:.0f}%"
-                )
-            with col3:
-                st.metric("MCC", f"{evaluation['mcc']:.2f}")
-
-            st.markdown("## Confusion Matrix")
-            st.pyplot(evaluation["confusion_matrix_display"])
-
-            st.markdown("## Hits and Misses")
-            st.dataframe(evaluation["hit_miss"])
-
-            if evaluation["accuracy"] == 1:
-                st.balloons()
-
-with tab2:
-    st.dataframe(st.session_state.train_dataset)
-
-with tab3:
-    prompt = st.text_area("Prompt", height=PROMPT_TEXT_HEIGHT)
-
-    submitted = st.button("Complete")
-
-    if submitted:
-        if not prompt:
-            st.error("Prompt must be specified.")
-            st.stop()
-
-        with st.spinner("Generating..."):
-            output, _ = complete(prompt, st.session_state["generation_config"])
-
-        st.text(output)
+if __name__ == "__main__":
+    main()
