@@ -1,5 +1,6 @@
 datasets
 huggingface_hub
+imbalanced-learn
 numpy
 pandas
 matplotlib
