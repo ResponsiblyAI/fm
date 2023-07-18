@@ -603,7 +603,7 @@ def main():
                         st.session_state.label_column,
                         st.session_state.input_columns,
                         search_row,
-                        st.session_state["generation_config"],
+                        st.session_state.generation_config,
                         inference_progress,
                     )
                 except HfHubHTTPError as e:
@@ -646,7 +646,15 @@ def main():
                 st.stop()
 
             with st.spinner("Generating..."):
-                output, _ = complete(prompt, st.session_state["generation_config"])
+                try:
+                    output, _ = complete(
+                        st.session_state.client,
+                        prompt,
+                        st.session_state.generation_config,
+                    )
+                except HfHubHTTPError as e:
+                    st.error(e)
+                    st.stop()
 
             st.text(output)
 
