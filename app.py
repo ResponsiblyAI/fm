@@ -110,7 +110,6 @@ def get_processing_tokenizer():
 PROCESSING_TOKENIZER = get_processing_tokenizer()
 
 
-@st.cache_resource
 def build_api_call_function(model, hf_token=None, openai_api_key=None):
     if model.startswith("openai"):
         openai.api_key = openai_api_key
