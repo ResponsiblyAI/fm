@@ -1,15 +1,17 @@
 """Prompter."""
 
 import logging
+import os
 import string
 
 import numpy as np
+import openai
 import pandas as pd
 import streamlit as st
 from datasets import load_dataset
 from datasets.tasks.text_classification import ClassLabel
 from huggingface_hub import InferenceClient, dataset_info, model_info
-from huggingface_hub.utils import HfHubHTTPError
+from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 from imblearn.under_sampling import RandomUnderSampler
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
@@ -20,10 +22,14 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import StratifiedShuffleSplit
 from spacy.lang.en import English
+from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 LOGGER = logging.getLogger(__name__)
 
 TITLE = "Prompter"
+
+OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
+HF_TOKEN = st.secrets.get("hf_token", None)
 
 HF_MODEL = st.secrets.get("hf_model", "")
 
@@ -34,6 +40,10 @@ TRAIN_SIZE = 10
 TEST_SIZE = 25
 SPLITS = ["train", "test"]
 STRATIFY = True
+
+RETRY_MIN_WAIT = 1
+RETRY_MAX_WAIT = 60
+RETRY_MAX_ATTEMPTS = 6
 
 PROMPT_TEXT_HEIGHT = 300
 
@@ -90,16 +100,120 @@ GENERATION_CONFIG_DEFAULTS = {
     key: value["DEFAULT"] for key, value in GENERATION_CONFIG_PARAMS.items()
 }
 
-
 st.set_page_config(page_title=TITLE, initial_sidebar_state="collapsed")
 
 
-@st.cache_data
 def get_processing_tokenizer():
     return English().tokenizer
 
 
 PROCESSING_TOKENIZER = get_processing_tokenizer()
+
+
+@st.cache_resource
+def build_api_call_function(model, hf_token=None, openai_api_key=None):
+    if model.startswith("openai"):
+        openai.api_key = openai_api_key
+        _, model = model.split("/")
+        openai_models = {model_obj["id"] for model_obj in openai.Model.list()["data"]}
+        assert model in openai_models
+
+        @retry(
+            wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        )
+        def api_call_function(prompt, generation_config):
+            if model.startswith("gpt-3.5-turbo") or model.startswith("gpt-4"):
+                response = openai.ChatCompletion.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=generation_config["temperature"],
+                    top_p=generation_config["top_p"],
+                    max_tokens=generation_config["max_new_tokens"],
+                )
+                assert response["choices"][0]["message"]["role"] == "assistant"
+                output = response["choices"][0]["message"]["content"]
+
+            else:
+                response = openai.Completion.create(
+                    model=model,
+                    prompt=prompt,
+                    temperature=generation_config["temperature"],
+                    top_p=generation_config["top_p"],
+                    max_tokens=generation_config["max_new_tokens"],
+                    stop=generation_config["stop_sequences"],
+                )
+                output = response.choices[0].text
+
+            try:
+                length = response.total_tokens
+            except AttributeError:
+                length = None
+
+            return output, length
+
+    else:
+        hf_client = InferenceClient(token=hf_token, model=model)
+
+        @retry(
+            wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        )
+        def api_call_function(prompt, generation_config):
+            # Reference for decoding stratagies:
+            # https://huggingface.co/docs/transformers/generation_strategies
+
+            # `text_generation_interface`
+            # Currenly supports only `greedy` amd `sampling` decoding strategies
+            # Following , we add `do_sample` if any of the other
+            # samling related parameters are set
+            # https://github.com/huggingface/text-generation-inference/blob/e943a294bca239e26828732dd6ab5b6f95dadd0a/server/text_generation_server/utils/tokens.py#L46
+
+            # `transformers`
+            # According to experimentations, it seems that `transformers` behave similarly
+
+            # I'm not sure what is the right behavior here, but it is better to be explicit
+            for name, params in GENERATION_CONFIG_PARAMS.items():
+                # Checking for START to examine the a slider parameters only
+                if (
+                    "START" in params
+                    and params["SAMPLING"]
+                    and name in generation_config
+                    and generation_config[name] is not None
+                ):
+                    if generation_config[name] == params["DEFAULT"]:
+                        generation_config[name] = None
+                    else:
+                        assert generation_config["do_sample"]
+
+            response = hf_client.text_generation(
+                prompt, stream=False, details=True, **generation_config
+            )
+            LOGGER.warning(response)
+
+            length = len(response.details.prefill) + len(response.details.tokens)
+
+            output = response.generated_text
+
+            # response = st.session_state.client.post(json={"inputs": prompt})
+            # output = response.json()[0]["generated_text"]
+            # output = st.session_state.client.conversational(prompt, model=model)
+            # output = output if "https" in st.session_state.client.model else output[len(prompt) :]
+
+            # Remove stop sequences from the output
+            # Inspired by
+            # https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/inference.py
+            # https://huggingface.co/spaces/tiiuae/falcon-chat/blob/main/app.py
+            if (
+                "stop_sequences" in generation_config
+                and generation_config["stop_sequences"] is not None
+            ):
+                for stop_sequence in generation_config["stop_sequences"]:
+                    output = output.rsplit(stop_sequence, maxsplit=1)[0]
+
+            return output, length
+
+    return api_call_function
 
 
 def strip_newline_space(text):
@@ -110,6 +224,7 @@ def normalize(text):
     return strip_newline_space(text).lower().capitalize()
 
 
+@st.cache_data
 def prepare_datasets(
     dataset_name,
     take_split="train",
@@ -189,83 +304,31 @@ def prepare_datasets(
     return dataset_name, dfs, input_columns, label_column, labels
 
 
-def complete(client, prompt, generation_config, details=True):
+def complete(api_call_function, prompt, generation_config=None):
     if generation_config is None:
         generation_config = {}
 
-    # Reference for decoding stratagies:
-    # https://huggingface.co/docs/transformers/generation_strategies
-
-    # `text_generation_interface`
-    # Currenly supports only `greedy` amd `sampling` decoding strategies
-    # Following , we add `do_sample` if any of the other
-    # samling related parameters are set
-    # https://github.com/huggingface/text-generation-inference/blob/e943a294bca239e26828732dd6ab5b6f95dadd0a/server/text_generation_server/utils/tokens.py#L46
-
-    # `transformers`
-    # According to experimentations, it seems that `transformers` behave similarly
-
-    # I'm not sure what is the right behavior here, but it is better to be explicit
-
-    for name, params in GENERATION_CONFIG_PARAMS.items():
-        # Checking for START to examine the a slider parameters only
-        if (
-            "START" in params
-            and params["SAMPLING"]
-            and name in generation_config
-            and generation_config[name] is not None
-        ):
-            if generation_config[name] == params["DEFAULT"]:
-                generation_config[name] = None
-            else:
-                assert generation_config["do_sample"]
-
     LOGGER.warning(f"API Call\n\n``{prompt}``\n\n{generation_config=}")
-    response = client.text_generation(
-        prompt, stream=False, details=details, **generation_config
-    )
-    LOGGER.warning(response)
 
-    length = (
-        len(response.details.prefill) + len(response.details.tokens)
-        if details
-        else None
-    )
+    output, length = api_call_function(prompt, generation_config)
 
-    output = response.generated_text if details else response
-
-    # Remove stop sequences from the output
-    # Inspired by
-    # https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/inference.py
-    # https://huggingface.co/spaces/tiiuae/falcon-chat/blob/main/app.py
-    if (
-        "stop_sequences" in generation_config
-        and generation_config["stop_sequences"] is not None
-    ):
-        for stop_sequence in generation_config["stop_sequences"]:
-            output = output.rsplit(stop_sequence, maxsplit=1)[0]
-
-    # response = st.session_state.client.post(json={"inputs": prompt})
-    # output = response.json()[0]["generated_text"]
-    # output = st.session_state.client.conversational(prompt, model=model)
-    # output = output if "https" in st.session_state.client.model else output[len(prompt) :]
     return output, length
 
 
-def infer(client, prompt_template, inputs, generation_config=None):
+def infer(api_call_function, prompt_template, inputs, generation_config=None):
     prompt = prompt_template.format(**inputs)
-    output, length = complete(client, prompt, generation_config)
+    output, length = complete(api_call_function, prompt, generation_config)
     return output, prompt, length
 
 
 def infer_multi(
-    client, prompt_template, inputs_df, generation_config=None, progress=None
+    api_call_function, prompt_template, inputs_df, generation_config=None, progress=None
 ):
     props = (i / len(inputs_df) for i in range(1, len(inputs_df) + 1))
 
     def infer_with_progress(inputs):
         output, prompt, length = infer(
-            client, prompt_template, inputs.to_dict(), generation_config
+            api_call_function, prompt_template, inputs.to_dict(), generation_config
         )
         if progress is not None:
             progress.progress(next(props))
@@ -356,7 +419,7 @@ def measure(dataset, outputs, labels, label_column, input_columns, search_row):
 
 
 def run_evaluation(
-    client,
+    api_call_function,
     prompt_template,
     dataset,
     labels,
@@ -368,7 +431,7 @@ def run_evaluation(
 ):
     inputs_df = dataset[input_columns]
     outputs, prompts, lengths = infer_multi(
-        client,
+        api_call_function,
         prompt_template,
         inputs_df,
         generation_config,
@@ -391,9 +454,15 @@ def main():
     if "dataset_split_seed" not in st.session_state:
         st.session_state["dataset_split_seed"] = DATASET_SPLIT_SEED_DEFAULT
 
-    if "client" not in st.session_state:
-        st.session_state["client"] = InferenceClient(
-            token=st.secrets.get("hf_token", None), model=HF_MODEL
+    if "train_size" not in st.session_state:
+        st.session_state["train_size"] = TRAIN_SIZE
+
+    if "test_size" not in st.session_state:
+        st.session_state["test_size"] = TEST_SIZE
+
+    if "api_call_function" not in st.session_state:
+        st.session_state["api_call_function"] = build_api_call_function(
+            model=HF_MODEL, hf_token=HF_TOKEN, openai_api_key=OPENAI_API_KEY
         )
 
     if "train_dataset" not in st.session_state:
@@ -404,7 +473,10 @@ def main():
             st.session_state["label_column"],
             st.session_state["labels"],
         ) = prepare_datasets(
-            HF_DATASET, dataset_split_seed=st.session_state["dataset_split_seed"]
+            HF_DATASET,
+            train_size=st.session_state.train_size,
+            test_size=st.session_state.test_size,
+            dataset_split_seed=st.session_state.dataset_split_seed,
         )
 
         for split in splits_df:
@@ -417,8 +489,6 @@ def main():
 
     with st.sidebar:
         with st.form("model_form"):
-            dataset = st.text_input("Dataset", HF_DATASET).strip()
-
             model = st.text_input("Model", HF_MODEL).strip()
 
             # Defautlt values from:
@@ -459,11 +529,20 @@ def main():
 
             decoding_seed = st.text_input("Decoding Seed").strip()
 
+            st.divider()
+
+            dataset = st.text_input("Dataset", HF_DATASET).strip()
+
+            train_size = st.number_input("Train Size", value=TRAIN_SIZE, min_value=10)
+            test_size = st.number_input("Test Size", value=TEST_SIZE, min_value=10)
+
+            stratify = st.checkbox("Stratify", STRATIFY)
+
             dataset_split_seed = st.text_input(
                 "Dataset Split Seed", st.session_state["dataset_split_seed"]
             ).strip()
 
-            stratify = st.checkbox("Stratify", STRATIFY)
+            st.divider()
 
             submitted = st.form_submit_button("Set")
 
@@ -526,9 +605,11 @@ def main():
                 )
 
                 st.session_state["dataset_split_seed"] = dataset_split_seed
+                st.session_state["train_size"] = train_size
+                st.session_state["test_size"] = test_size
 
-                st.session_state["client"] = InferenceClient(
-                    token=st.secrets.get("hf_token", None), model=model
+                st.session_state["api_call_function"] = build_api_call_function(
+                    model=model, hf_token=HF_TOKEN, openai_api_key=OPENAI_API_KEY
                 )
 
                 st.session_state["generation_config"] = generation_config
@@ -541,8 +622,10 @@ def main():
                     st.session_state["labels"],
                 ) = prepare_datasets(
                     dataset,
+                    train_size=st.session_state.train_size,
+                    test_size=st.session_state.test_size,
                     stratify=stratify,
-                    dataset_split_seed=st.session_state["dataset_split_seed"],
+                    dataset_split_seed=st.session_state.dataset_split_seed,
                 )
 
                 for split in splits_df:
@@ -555,9 +638,11 @@ def main():
         with st.expander("Info"):
             st.caption("Dataset")
             st.write(dataset_info(st.session_state.dataset_name).cardData)
-            if "http" not in model:
+            try:
                 st.caption("Model")
                 st.write(model_info(model).cardData)
+            except RepositoryNotFoundError:
+                pass
 
             # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
 
@@ -598,7 +683,7 @@ def main():
 
                 try:
                     evaluation = run_evaluation(
-                        st.session_state.client,
+                        st.session_state.api_call_function,
                         prompt_template,
                         st.session_state.test_dataset,
                         st.session_state.labels,
@@ -650,7 +735,7 @@ def main():
             with st.spinner("Generating..."):
                 try:
                     output, _ = complete(
-                        st.session_state.client,
+                        st.session_state.api_call_function,
                         prompt,
                         st.session_state.generation_config,
                     )
