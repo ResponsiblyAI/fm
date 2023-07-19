@@ -36,8 +36,8 @@ HF_MODEL = os.environ.get("FM_MODEL", "")
 HF_DATASET = os.environ.get("FM_HF_DATASET", "")
 
 DATASET_SPLIT_SEED_DEFAULT = 42
-TRAIN_SIZE = 50
-TEST_SIZE = 15
+TRAIN_SIZE = 15
+TEST_SIZE = 50
 SPLITS = ["train", "test"]
 STRATIFY = True
 
