@@ -645,7 +645,7 @@ def main():
 
             # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
 
-    tab1, tab2, tab3 = st.tabs(["Evaluation", "Training Dataset", "Playground"])
+    tab1, tab2, tab3 = st.tabs(["Evaluation", "Examples", "Playground"])
 
     with tab1:
         with st.form("prompt_form"):
