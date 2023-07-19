@@ -4,6 +4,8 @@ imbalanced-learn
 numpy
 pandas
 matplotlib
+openai
 scikit-learn
 spacy
 streamlit
+tenacity
