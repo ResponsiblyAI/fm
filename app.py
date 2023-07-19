@@ -31,9 +31,9 @@ TITLE = "Prompter"
 OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
 HF_TOKEN = st.secrets.get("hf_token", None)
 
-HF_MODEL = st.secrets.get("hf_model", "")
+HF_MODEL = os.environ.get("FM_MODEL", "")
 
-HF_DATASET = st.secrets.get("hf_dataset", "")
+HF_DATASET = os.environ.get("FM_HF_DATASET", "")
 
 DATASET_SPLIT_SEED_DEFAULT = 42
 TRAIN_SIZE = 10
@@ -91,7 +91,7 @@ GENERATION_CONFIG_PARAMS = {
     },
     "stop_sequences": {
         "NAME": "Stop Sequences",
-        "DEFAULT": st.secrets.get("stop_sequences", "").split(),
+        "DEFAULT": os.environ.get("FM_STOP_SEQUENCES", "").split(),
         "SAMPLING": False,
     },
 }
