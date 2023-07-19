@@ -126,7 +126,9 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
                 response = openai.ChatCompletion.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=generation_config["temperature"],
+                    temperature=generation_config["temperature"]
+                    if generation_config["do_sample"]
+                    else 0,
                     top_p=generation_config["top_p"],
                     max_tokens=generation_config["max_new_tokens"],
                 )
