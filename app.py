@@ -225,7 +225,6 @@ def normalize(text):
     return strip_newline_space(text).lower().capitalize()
 
 
-@st.cache_data
 def prepare_datasets(
     dataset_name,
     take_split="train",
