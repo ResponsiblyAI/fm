@@ -45,7 +45,6 @@ HF_DATASET = os.environ.get("FM_HF_DATASET", "")
 DATASET_SPLIT_SEED = os.environ.get("FM_DATASET_SPLIT_SEED", "")
 TRAIN_SIZE = 15
 TEST_SIZE = 25
-SPLITS = ["train", "test"]
 STRATIFY = True
 
 RETRY_MIN_WAIT = 10
