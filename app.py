@@ -18,6 +18,7 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
 )
 from imblearn.under_sampling import RandomUnderSampler
+import requests
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     accuracy_score,
@@ -34,6 +35,7 @@ LOGGER = logging.getLogger(__name__)
 TITLE = "Prompter"
 
 OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
+TOGETHER_API_KEY = st.secrets.get("together_api_key", None)
 HF_TOKEN = st.secrets.get("hf_token", None)
 
 HF_MODEL = os.environ.get("FM_MODEL", "")
@@ -157,6 +159,42 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
                 length = response.total_tokens
             except AttributeError:
                 length = None
+
+            return output, length
+
+    elif model.startswith("togethercomputer"):
+        TOGETHER_API_ENDPOINT = "https://api.together.xyz/inference"
+
+        @retry(
+            wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        )
+        async def api_call_function(prompt, generation_config):
+            res = requests.post(
+                TOGETHER_API_ENDPOINT,
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "temperature": generation_config["temperature"]
+                    if generation_config["do_sample"]
+                    else 0,
+                    "top_p": generation_config["top_p"]
+                    if generation_config["do_sample"]
+                    else 1,
+                    "top_k": generation_config["top_k"]
+                    if generation_config["do_sample"]
+                    else 0,
+                    "max_tokens": generation_config["max_new_tokens"],
+                    "stop": generation_config["stop_sequences"],
+                },
+                headers={
+                    "Authorization": f"Bearer {TOGETHER_API_KEY}",
+                    "User-Agent": "FM",
+                },
+            )
+
+            output = res.json()["output"]["choices"][0]["text"]
+            length = None
 
             return output, length
 

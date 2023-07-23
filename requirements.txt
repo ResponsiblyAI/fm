@@ -5,6 +5,7 @@ numpy
 pandas
 matplotlib
 openai
+requests
 scikit-learn
 spacy
 streamlit
