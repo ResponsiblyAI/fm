@@ -1,5 +1,5 @@
 datasets
-huggingface_hub
+huggingface_hub[inference]
 imbalanced-learn
 numpy
 pandas

@@ -1,5 +1,6 @@
 """Prompter."""
 
+import asyncio
 import logging
 import os
 import string
@@ -10,8 +11,12 @@ import pandas as pd
 import streamlit as st
 from datasets import load_dataset
 from datasets.tasks.text_classification import ClassLabel
-from huggingface_hub import InferenceClient, dataset_info, model_info
-from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
+from huggingface_hub import AsyncInferenceClient, dataset_info, model_info
+from huggingface_hub.utils import (
+    HfHubHTTPError,
+    HFValidationError,
+    RepositoryNotFoundError,
+)
 from imblearn.under_sampling import RandomUnderSampler
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
@@ -41,8 +46,8 @@ TEST_SIZE = 25
 SPLITS = ["train", "test"]
 STRATIFY = True
 
-RETRY_MIN_WAIT = 1
-RETRY_MAX_WAIT = 60
+RETRY_MIN_WAIT = 10
+RETRY_MAX_WAIT = 90
 RETRY_MAX_ATTEMPTS = 6
 
 PROMPT_TEXT_HEIGHT = 300
@@ -121,22 +126,24 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
         )
-        def api_call_function(prompt, generation_config):
+        async def api_call_function(prompt, generation_config):
             if model.startswith("gpt-3.5-turbo") or model.startswith("gpt-4"):
-                response = openai.ChatCompletion.create(
+                response = await openai.ChatCompletion.acreate(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=generation_config["temperature"]
                     if generation_config["do_sample"]
                     else 0,
-                    top_p=generation_config["top_p"],
+                    top_p=generation_config["top_p"]
+                    if generation_config["do_sample"]
+                    else 1,
                     max_tokens=generation_config["max_new_tokens"],
                 )
                 assert response["choices"][0]["message"]["role"] == "assistant"
                 output = response["choices"][0]["message"]["content"]
 
             else:
-                response = openai.Completion.create(
+                response = await openai.Completion.acreate(
                     model=model,
                     prompt=prompt,
                     temperature=generation_config["temperature"],
@@ -160,7 +167,9 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
         )
-        def api_call_function(prompt, generation_config):
+        async def api_call_function(prompt, generation_config):
+            hf_client = AsyncInferenceClient(token=hf_token, model=model)
+
             # Reference for decoding stratagies:
             # https://huggingface.co/docs/transformers/generation_strategies
 
@@ -187,7 +196,7 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
                     else:
                         assert generation_config["do_sample"]
 
-            response = hf_client.text_generation(
+            response = await hf_client.text_generation(
                 prompt, stream=False, details=True, **generation_config
             )
             LOGGER.warning(response)
@@ -304,37 +313,36 @@ def prepare_datasets(
     return dataset_name, dfs, input_columns, label_column, labels
 
 
-def complete(api_call_function, prompt, generation_config=None):
+async def complete(api_call_function, prompt, generation_config=None):
     if generation_config is None:
         generation_config = {}
 
     LOGGER.warning(f"API Call\n\n``{prompt}``\n\n{generation_config=}")
 
-    output, length = api_call_function(prompt, generation_config)
+    output, length = await api_call_function(prompt, generation_config)
 
     return output, length
 
 
-def infer(api_call_function, prompt_template, inputs, generation_config=None):
+async def infer(api_call_function, prompt_template, inputs, generation_config=None):
     prompt = prompt_template.format(**inputs)
-    output, length = complete(api_call_function, prompt, generation_config)
+    output, length = await complete(api_call_function, prompt, generation_config)
     return output, prompt, length
 
 
-def infer_multi(
-    api_call_function, prompt_template, inputs_df, generation_config=None, progress=None
+async def infer_multi(
+    api_call_function, prompt_template, inputs_df, generation_config=None
 ):
-    props = (i / len(inputs_df) for i in range(1, len(inputs_df) + 1))
-
-    def infer_with_progress(inputs):
-        output, prompt, length = infer(
-            api_call_function, prompt_template, inputs.to_dict(), generation_config
+    results = await asyncio.gather(
+        *(
+            infer(
+                api_call_function, prompt_template, inputs.to_dict(), generation_config
+            )
+            for _, inputs in inputs_df.iterrows()
         )
-        if progress is not None:
-            progress.progress(next(props))
-        return output, prompt, length
+    )
 
-    return zip(*inputs_df.apply(infer_with_progress, axis=1))
+    return zip(*results)
 
 
 def preprocess_output_line(text):
@@ -427,15 +435,15 @@ def run_evaluation(
     input_columns,
     search_row,
     generation_config=None,
-    progress=None,
 ):
     inputs_df = dataset[input_columns]
-    outputs, prompts, lengths = infer_multi(
-        api_call_function,
-        prompt_template,
-        inputs_df,
-        generation_config,
-        progress,
+    outputs, prompts, lengths = asyncio.run(
+        infer_multi(
+            api_call_function,
+            prompt_template,
+            inputs_df,
+            generation_config,
+        )
     )
 
     metrics = measure(dataset, outputs, labels, label_column, input_columns, search_row)
@@ -638,12 +646,15 @@ def main():
                 LOGGER.warning(f"FORM {generation_config=}")
 
         with st.expander("Info"):
-            st.caption("Dataset")
-            st.write(dataset_info(st.session_state.dataset_name).cardData)
+            try:
+                st.caption("Dataset")
+                st.write(dataset_info(st.session_state.dataset_name).cardData)
+            except (HFValidationError, RepositoryNotFoundError):
+                pass
             try:
                 st.caption("Model")
                 st.write(model_info(model).cardData)
-            except RepositoryNotFoundError:
+            except (HFValidationError, RepositoryNotFoundError):
                 pass
 
             # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
@@ -681,23 +692,21 @@ def main():
                     st.error(f"The prompt template contains unrecognized fields.")
                     st.stop()
 
-                inference_progress = st.progress(0, "Executing inference")
-
-                try:
-                    evaluation = run_evaluation(
-                        st.session_state.api_call_function,
-                        prompt_template,
-                        st.session_state.test_dataset,
-                        st.session_state.labels,
-                        st.session_state.label_column,
-                        st.session_state.input_columns,
-                        search_row,
-                        st.session_state.generation_config,
-                        inference_progress,
-                    )
-                except HfHubHTTPError as e:
-                    st.error(e)
-                    st.stop()
+                with st.spinner("Executing inference..."):
+                    try:
+                        evaluation = run_evaluation(
+                            st.session_state.api_call_function,
+                            prompt_template,
+                            st.session_state.test_dataset,
+                            st.session_state.labels,
+                            st.session_state.label_column,
+                            st.session_state.input_columns,
+                            search_row,
+                            st.session_state.generation_config,
+                        )
+                    except HfHubHTTPError as e:
+                        st.error(e)
+                        st.stop()
 
                 num_metric_cols = 1 if stratify else 3
                 cols = st.columns(num_metric_cols)
@@ -736,10 +745,12 @@ def main():
 
             with st.spinner("Generating..."):
                 try:
-                    output, _ = complete(
-                        st.session_state.api_call_function,
-                        prompt,
-                        st.session_state.generation_config,
+                    output, _ = asyncio.run(
+                        complete(
+                            st.session_state.api_call_function,
+                            prompt,
+                            st.session_state.generation_config,
+                        )
                     )
                 except HfHubHTTPError as e:
                     st.error(e)
