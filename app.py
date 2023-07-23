@@ -151,7 +151,6 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
                     temperature=generation_config["temperature"],
                     top_p=generation_config["top_p"],
                     max_tokens=generation_config["max_new_tokens"],
-                    stop=generation_config["stop_sequences"],
                 )
                 output = response.choices[0].text
 
@@ -199,7 +198,6 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
             return output, length
 
     else:
-        hf_client = InferenceClient(token=hf_token, model=model)
 
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
