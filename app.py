@@ -38,7 +38,7 @@ TITLE = "Prompter"
 OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
 TOGETHER_API_KEY = st.secrets.get("together_api_key", None)
 HF_TOKEN = st.secrets.get("hf_token", None)
-# COHERE_API_KEY = st.secrets.get("cohere_api_key", None)
+COHERE_API_KEY = st.secrets.get("cohere_api_key", None)
 
 HF_MODEL = os.environ.get("FM_MODEL", "")
 
@@ -198,30 +198,31 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
 
             return output, length
 
-    # elif model.startswith("cohere"):
-    #     co =  cohere.Client(COHERE_API_KEY)
-    #     _, model = model.split("/")
-    #     @retry(
-    #         wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
-    #         stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
-    #     )
-    #     def api_call_function(prompt, generation_config):
-    #         response = co.generate(
-    #             model=model,
-    #             prompt=prompt,
-    #             temperature=generation_config["temperature"]
-    #             if generation_config["do_sample"]
-    #             else 0,
-    #             p=generation_config["top_p"] if generation_config["do_sample"] else 1,
-    #             k=generation_config["top_k"] if generation_config["do_sample"] else 0,
-    #             max_tokens=generation_config["max_new_tokens"],
-    #             end_sequences=generation_config["stop_sequences"],
-    #         )
+    elif model.startswith("cohere"):
+        co = cohere.Client(COHERE_API_KEY)
+        _, model = model.split("/")
 
-    #         output = response.generations[0].text
-    #         length = None
+        @retry(
+            wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+        )
+        def api_call_function(prompt, generation_config):
+            response = co.generate(
+                model=model,
+                prompt=prompt,
+                temperature=generation_config["temperature"]
+                if generation_config["do_sample"]
+                else 0,
+                p=generation_config["top_p"] if generation_config["do_sample"] else 1,
+                k=generation_config["top_k"] if generation_config["do_sample"] else 0,
+                max_tokens=generation_config["max_new_tokens"],
+                end_sequences=generation_config["stop_sequences"],
+            )
 
-    #         return output, length
+            output = response.generations[0].text
+            length = None
+
+            return output, length
 
     else:
 

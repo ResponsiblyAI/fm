@@ -1,3 +1,4 @@
+cohere
 datasets
 huggingface_hub[inference]
 imbalanced-learn
