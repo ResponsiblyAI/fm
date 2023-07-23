@@ -5,6 +5,7 @@ import logging
 import os
 import string
 
+import cohere
 import numpy as np
 import openai
 import pandas as pd
@@ -37,6 +38,7 @@ TITLE = "Prompter"
 OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
 TOGETHER_API_KEY = st.secrets.get("together_api_key", None)
 HF_TOKEN = st.secrets.get("hf_token", None)
+# COHERE_API_KEY = st.secrets.get("cohere_api_key", None)
 
 HF_MODEL = os.environ.get("FM_MODEL", "")
 
@@ -45,7 +47,7 @@ HF_DATASET = os.environ.get("FM_HF_DATASET", "")
 DATASET_SPLIT_SEED = os.environ.get("FM_DATASET_SPLIT_SEED", "")
 TRAIN_SIZE = 15
 TEST_SIZE = 25
-STRATIFY = True
+BALANCING = True
 
 RETRY_MIN_WAIT = 10
 RETRY_MAX_WAIT = 90
@@ -196,6 +198,31 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
 
             return output, length
 
+    # elif model.startswith("cohere"):
+    #     co =  cohere.Client(COHERE_API_KEY)
+    #     _, model = model.split("/")
+    #     @retry(
+    #         wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+    #         stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+    #     )
+    #     def api_call_function(prompt, generation_config):
+    #         response = co.generate(
+    #             model=model,
+    #             prompt=prompt,
+    #             temperature=generation_config["temperature"]
+    #             if generation_config["do_sample"]
+    #             else 0,
+    #             p=generation_config["top_p"] if generation_config["do_sample"] else 1,
+    #             k=generation_config["top_k"] if generation_config["do_sample"] else 0,
+    #             max_tokens=generation_config["max_new_tokens"],
+    #             end_sequences=generation_config["stop_sequences"],
+    #         )
+
+    #         output = response.generations[0].text
+    #         length = None
+
+    #         return output, length
+
     else:
 
         @retry(
@@ -274,7 +301,7 @@ def prepare_datasets(
     take_split="train",
     train_size=TRAIN_SIZE,
     test_size=TEST_SIZE,
-    stratify=STRATIFY,
+    balancing=BALANCING,
     dataset_split_seed=None,
 ):
     try:
@@ -581,7 +608,7 @@ def main():
             train_size = st.number_input("Train Size", value=TRAIN_SIZE, min_value=10)
             test_size = st.number_input("Test Size", value=TEST_SIZE, min_value=10)
 
-            stratify = st.checkbox("Stratify", STRATIFY)
+            balancing = st.checkbox("Balancing", BALANCING)
 
             dataset_split_seed = st.text_input(
                 "Dataset Split Seed", DATASET_SPLIT_SEED
@@ -669,7 +696,7 @@ def main():
                     dataset,
                     train_size=st.session_state.train_size,
                     test_size=st.session_state.test_size,
-                    stratify=stratify,
+                    balancing=balancing,
                     dataset_split_seed=st.session_state.dataset_split_seed,
                 )
 
@@ -743,11 +770,11 @@ def main():
                         st.error(e)
                         st.stop()
 
-                num_metric_cols = 1 if stratify else 3
+                num_metric_cols = 1 if balancing else 3
                 cols = st.columns(num_metric_cols)
                 with cols[0]:
                     st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
-                if not stratify:
+                if not balancing:
                     with cols[1]:
                         st.metric(
                             "Balanced Accuracy",
