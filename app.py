@@ -35,9 +35,9 @@ HF_MODEL = os.environ.get("FM_MODEL", "")
 
 HF_DATASET = os.environ.get("FM_HF_DATASET", "")
 
-DATASET_SPLIT_SEED_DEFAULT = 42
+DATASET_SPLIT_SEED = os.environ.get("FM_DATASET_SPLIT_SEED", "")
 TRAIN_SIZE = 15
-TEST_SIZE = 50
+TEST_SIZE = 25
 SPLITS = ["train", "test"]
 STRATIFY = True
 
@@ -452,7 +452,9 @@ def combine_labels(labels):
 
 def main():
     if "dataset_split_seed" not in st.session_state:
-        st.session_state["dataset_split_seed"] = DATASET_SPLIT_SEED_DEFAULT
+        st.session_state["dataset_split_seed"] = (
+            int(DATASET_SPLIT_SEED) if DATASET_SPLIT_SEED else None
+        )
 
     if "train_size" not in st.session_state:
         st.session_state["train_size"] = TRAIN_SIZE
@@ -539,7 +541,7 @@ def main():
             stratify = st.checkbox("Stratify", STRATIFY)
 
             dataset_split_seed = st.text_input(
-                "Dataset Split Seed", st.session_state["dataset_split_seed"]
+                "Dataset Split Seed", DATASET_SPLIT_SEED
             ).strip()
 
             st.divider()
