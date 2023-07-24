@@ -4,11 +4,11 @@ import asyncio
 import logging
 import os
 import string
+import importlib
 
 import aiohttp
 import cohere
 import numpy as np
-import openai
 import pandas as pd
 import streamlit as st
 from datasets import load_dataset
@@ -31,6 +31,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from spacy.lang.en import English
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
+
 LOGGER = logging.getLogger(__name__)
 
 TITLE = "Prompter"
@@ -39,6 +40,10 @@ OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
 TOGETHER_API_KEY = st.secrets.get("together_api_key", None)
 HF_TOKEN = st.secrets.get("hf_token", None)
 COHERE_API_KEY = st.secrets.get("cohere_api_key", None)
+AZURE_OPENAI_KEY = st.secrets.get("azure_openai_key", None)
+AZURE_OPENAI_ENDPOINT = st.secrets.get("azure_openai_endpoint", None)
+
+AZURE_DEPLOYMENT_NAME = os.environ.get("AZURE_DEPLOYMENT_NAME", None)
 
 HF_MODEL = os.environ.get("FM_MODEL", "")
 
@@ -118,11 +123,25 @@ def get_processing_tokenizer():
 PROCESSING_TOKENIZER = get_processing_tokenizer()
 
 
-def build_api_call_function(model, hf_token=None, openai_api_key=None):
-    if model.startswith("openai"):
-        openai.api_key = openai_api_key
+def build_api_call_function(model, hf_token=None):
+    if model.startswith("openai") or model.startswith("azure"):
+        openai_lib = importlib.import_module("openai")
+
+        if model.startswith("openai"):
+            openai_lib.api_key = OPENAI_API_KEY
+            engine = None
+
+        elif model.startswith("azure"):
+            openai_lib.api_key = AZURE_OPENAI_KEY
+            openai_lib.base = AZURE_OPENAI_ENDPOINT
+            openai_lib.api_type = "azure"
+            openai_lib.api_version = "2023-05-15"
+            engine = AZURE_DEPLOYMENT_NAME
+
         _, model = model.split("/")
-        openai_models = {model_obj["id"] for model_obj in openai.Model.list()["data"]}
+        openai_models = {
+            model_obj["id"] for model_obj in openai_lib.Model.list()["data"]
+        }
         assert model in openai_models
 
         @retry(
@@ -132,7 +151,8 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
         )
         async def api_call_function(prompt, generation_config):
             if model.startswith("gpt-3.5-turbo") or model.startswith("gpt-4"):
-                response = await openai.ChatCompletion.acreate(
+                response = await openai_lib.ChatCompletion.acreate(
+                    engine=engine,
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=generation_config["temperature"]
@@ -147,7 +167,8 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
                 output = response["choices"][0]["message"]["content"]
 
             else:
-                response = await openai.Completion.acreate(
+                response = await openai_lib.Completion.acreate(
+                    engine=engine,
                     model=model,
                     prompt=prompt,
                     temperature=generation_config["temperature"],
@@ -546,9 +567,7 @@ def main():
 
     if "api_call_function" not in st.session_state:
         st.session_state["api_call_function"] = build_api_call_function(
-            model=HF_MODEL,
-            hf_token=HF_TOKEN,
-            openai_api_key=OPENAI_API_KEY,
+            model=HF_MODEL, hf_token=HF_TOKEN
         )
 
     if "train_dataset" not in st.session_state:
@@ -697,7 +716,6 @@ def main():
                 st.session_state["api_call_function"] = build_api_call_function(
                     model=model,
                     hf_token=HF_TOKEN,
-                    openai_api_key=OPENAI_API_KEY,
                 )
 
                 st.session_state["generation_config"] = generation_config
