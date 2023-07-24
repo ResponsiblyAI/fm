@@ -262,7 +262,7 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
             response = await hf_client.text_generation(
                 prompt, stream=False, details=True, **generation_config
             )
-            LOGGER.warning(response)
+            LOGGER.info(response)
 
             length = len(response.details.prefill) + len(response.details.tokens)
 
@@ -380,7 +380,7 @@ async def complete(api_call_function, prompt, generation_config=None):
     if generation_config is None:
         generation_config = {}
 
-    LOGGER.warning(f"API Call\n\n``{prompt}``\n\n{generation_config=}")
+    LOGGER.info(f"API Call\n\n``{prompt}``\n\n{generation_config=}")
 
     output, length = await api_call_function(prompt, generation_config)
 
@@ -446,8 +446,8 @@ def canonize_label(output, annotation_labels, search_row):
 def measure(dataset, outputs, labels, label_column, input_columns, search_row):
     inferences = [canonize_label(output, labels, search_row) for output in outputs]
 
-    LOGGER.warning(f"{inferences=}")
-    LOGGER.warning(f"{labels=}")
+    LOGGER.info(f"{inferences=}")
+    LOGGER.info(f"{labels=}")
     inference_labels = labels + [UNKNOWN_LABEL]
 
     evaluation_df = pd.DataFrame(
@@ -704,9 +704,9 @@ def main():
                 for split in splits_df:
                     st.session_state[f"{split}_dataset"] = splits_df[split]
 
-                LOGGER.warning(f"FORM {dataset=}")
-                LOGGER.warning(f"FORM {model=}")
-                LOGGER.warning(f"FORM {generation_config=}")
+                LOGGER.info(f"FORM {dataset=}")
+                LOGGER.info(f"FORM {model=}")
+                LOGGER.info(f"FORM {generation_config=}")
 
         with st.expander("Info"):
             try:
@@ -823,5 +823,5 @@ def main():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     main()
