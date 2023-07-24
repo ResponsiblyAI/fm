@@ -5,6 +5,7 @@ import logging
 import os
 import string
 
+import aiohttp
 import cohere
 import numpy as np
 import openai
@@ -19,7 +20,6 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
 )
 from imblearn.under_sampling import RandomUnderSampler
-import requests
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     accuracy_score,
@@ -128,6 +128,7 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+            reraise=True,
         )
         async def api_call_function(prompt, generation_config):
             if model.startswith("gpt-3.5-turbo") or model.startswith("gpt-4"):
@@ -168,35 +169,40 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+            reraise=True,
         )
         async def api_call_function(prompt, generation_config):
-            res = requests.post(
-                TOGETHER_API_ENDPOINT,
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "temperature": generation_config["temperature"]
-                    if generation_config["do_sample"]
-                    else 0,
-                    "top_p": generation_config["top_p"]
-                    if generation_config["do_sample"]
-                    else 1,
-                    "top_k": generation_config["top_k"]
-                    if generation_config["do_sample"]
-                    else 0,
-                    "max_tokens": generation_config["max_new_tokens"],
-                    "stop": generation_config["stop_sequences"],
-                },
-                headers={
-                    "Authorization": f"Bearer {TOGETHER_API_KEY}",
-                    "User-Agent": "FM",
-                },
-            )
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "temperature": generation_config["temperature"]
+                if generation_config["do_sample"]
+                else 0,
+                "top_p": generation_config["top_p"]
+                if generation_config["do_sample"]
+                else 1,
+                "top_k": generation_config["top_k"]
+                if generation_config["do_sample"]
+                else 0,
+                "max_tokens": generation_config["max_new_tokens"],
+                "stop": generation_config["stop_sequences"],
+            }
 
-            output = res.json()["output"]["choices"][0]["text"]
-            length = None
+            headers = {
+                "Authorization": f"Bearer {TOGETHER_API_KEY}",
+                "User-Agent": "FM",
+            }
 
-            return output, length
+            LOGGER.info(f"{payload=}")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    TOGETHER_API_ENDPOINT, json=payload, headers=headers
+                ) as response:
+                    output = (await response.json())["output"]["choices"][0]["text"]
+                    length = None
+
+                    return output, length
 
     elif model.startswith("cohere"):
         co = cohere.Client(COHERE_API_KEY)
@@ -205,6 +211,7 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+            reraise=True,
         )
         def api_call_function(prompt, generation_config):
             response = co.generate(
@@ -229,6 +236,7 @@ def build_api_call_function(model, hf_token=None, openai_api_key=None):
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+            reraise=True,
         )
         async def api_call_function(prompt, generation_config):
             hf_client = AsyncInferenceClient(token=hf_token, model=model)
@@ -460,6 +468,8 @@ def measure(dataset, outputs, labels, label_column, input_columns, search_row):
         | dataset[input_columns].to_dict("list")
     )
 
+    unknown_proportion = (evaluation_df["inference"] == UNKNOWN_LABEL).mean()
+
     acc = accuracy_score(evaluation_df["annotation"], evaluation_df["inference"])
     bacc = balanced_accuracy_score(
         evaluation_df["annotation"], evaluation_df["inference"]
@@ -476,6 +486,7 @@ def measure(dataset, outputs, labels, label_column, input_columns, search_row):
     cm_display.figure_.autofmt_xdate(rotation=45)
 
     metrics = {
+        "unknown_proportion": unknown_proportion,
         "accuracy": acc,
         "balanced_accuracy": bacc,
         "mcc": mcc,
@@ -535,7 +546,9 @@ def main():
 
     if "api_call_function" not in st.session_state:
         st.session_state["api_call_function"] = build_api_call_function(
-            model=HF_MODEL, hf_token=HF_TOKEN, openai_api_key=OPENAI_API_KEY
+            model=HF_MODEL,
+            hf_token=HF_TOKEN,
+            openai_api_key=OPENAI_API_KEY,
         )
 
     if "train_dataset" not in st.session_state:
@@ -682,7 +695,9 @@ def main():
                 st.session_state["test_size"] = test_size
 
                 st.session_state["api_call_function"] = build_api_call_function(
-                    model=model, hf_token=HF_TOKEN, openai_api_key=OPENAI_API_KEY
+                    model=model,
+                    hf_token=HF_TOKEN,
+                    openai_api_key=OPENAI_API_KEY,
                 )
 
                 st.session_state["generation_config"] = generation_config
@@ -771,17 +786,22 @@ def main():
                         st.error(e)
                         st.stop()
 
-                num_metric_cols = 1 if balancing else 3
+                num_metric_cols = 2 if balancing else 4
                 cols = st.columns(num_metric_cols)
                 with cols[0]:
                     st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
+                with cols[1]:
+                    st.metric(
+                        "Unknown Proportion",
+                        f"{100 * evaluation['unknown_proportion']:.0f}%",
+                    )
                 if not balancing:
-                    with cols[1]:
+                    with cols[2]:
                         st.metric(
                             "Balanced Accuracy",
                             f"{100 * evaluation['balanced_accuracy']:.0f}%",
                         )
-                    with cols[2]:
+                    with cols[3]:
                         st.metric("MCC", f"{evaluation['mcc']:.2f}")
 
                 st.markdown("## Confusion Matrix")
