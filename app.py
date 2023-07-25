@@ -123,6 +123,27 @@ def get_processing_tokenizer():
 PROCESSING_TOKENIZER = get_processing_tokenizer()
 
 
+def escape_markdown(text):
+    escape_dict = {
+        "*": r"\*",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "[": r"\[",
+        "]": r"\]",
+        "(": r"\(",
+        ")": r"\)",
+        "+": r"\+",
+        "-": r"\-",
+        ".": r"\.",
+        "!": r"\!",
+        "`": r"\`",
+        ">": r"\>",
+        "|": r"\|",
+    }
+    return "".join([escape_dict.get(c, c) for c in text])
+
+
 def build_api_call_function(model, hf_token=None):
     if model.startswith("openai") or model.startswith("azure"):
         openai_lib = importlib.import_module("openai")
@@ -855,7 +876,7 @@ def main():
                     st.error(e)
                     st.stop()
 
-            st.text(output)
+            st.markdown(escape_markdown(output))
 
 
 if __name__ == "__main__":
