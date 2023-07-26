@@ -140,6 +140,7 @@ def escape_markdown(text):
         "`": r"\`",
         ">": r"\>",
         "|": r"\|",
+        "#": r"\#",
     }
     return "".join([escape_dict.get(c, c) for c in text])
 
