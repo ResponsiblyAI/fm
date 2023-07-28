@@ -215,23 +215,25 @@ def build_api_call_function(model, hf_token=None):
             reraise=True,
         )
         async def api_call_function(prompt, generation_config):
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "max_tokens": generation_config["max_new_tokens"],
-                "stop": generation_config["stop_sequences"],
-            }
-
-            if generation_config["do_sample"]:
-                payload["temperature"] = generation_config["temperature"]
-                if generation_config["top_p"] < 1:
-                    payload["top_p"] = generation_config["top_p"]
-                if generation_config["top_k"] > 0:
-                    payload["top_k"] = generation_config["top_k"]
-
             headers = {
                 "Authorization": f"Bearer {TOGETHER_API_KEY}",
                 "User-Agent": "FM",
+            }
+
+            payload = {
+                "temperature": generation_config["temperature"]
+                if generation_config["do_sample"]
+                else 0,
+                "top_p": generation_config["top_p"]
+                if generation_config["do_sample"]
+                else 1,
+                "top_k": generation_config["top_k"]
+                if generation_config["do_sample"]
+                else 0,
+                "max_tokens": generation_config["max_new_tokens"],
+                "prompt": prompt,
+                "model": model,
+                "stop": generation_config["stop_sequences"],
             }
 
             LOGGER.info(f"{payload=}")
