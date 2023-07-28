@@ -576,41 +576,45 @@ def combine_labels(labels):
 
 
 def main():
-    if "dataset_split_seed" not in st.session_state:
-        st.session_state["dataset_split_seed"] = (
-            int(DATASET_SPLIT_SEED) if DATASET_SPLIT_SEED else None
-        )
+    try:
+        if "dataset_split_seed" not in st.session_state:
+            st.session_state["dataset_split_seed"] = (
+                int(DATASET_SPLIT_SEED) if DATASET_SPLIT_SEED else None
+            )
 
-    if "train_size" not in st.session_state:
-        st.session_state["train_size"] = TRAIN_SIZE
+        if "train_size" not in st.session_state:
+            st.session_state["train_size"] = TRAIN_SIZE
 
-    if "test_size" not in st.session_state:
-        st.session_state["test_size"] = TEST_SIZE
+        if "test_size" not in st.session_state:
+            st.session_state["test_size"] = TEST_SIZE
 
-    if "api_call_function" not in st.session_state:
-        st.session_state["api_call_function"] = build_api_call_function(
-            model=HF_MODEL, hf_token=HF_TOKEN
-        )
+        if "api_call_function" not in st.session_state:
+            st.session_state["api_call_function"] = build_api_call_function(
+                model=HF_MODEL, hf_token=HF_TOKEN
+            )
 
-    if "train_dataset" not in st.session_state:
-        (
-            st.session_state["dataset_name"],
-            splits_df,
-            st.session_state["input_columns"],
-            st.session_state["label_column"],
-            st.session_state["labels"],
-        ) = prepare_datasets(
-            HF_DATASET,
-            train_size=st.session_state.train_size,
-            test_size=st.session_state.test_size,
-            dataset_split_seed=st.session_state.dataset_split_seed,
-        )
+        if "train_dataset" not in st.session_state:
+            (
+                st.session_state["dataset_name"],
+                splits_df,
+                st.session_state["input_columns"],
+                st.session_state["label_column"],
+                st.session_state["labels"],
+            ) = prepare_datasets(
+                HF_DATASET,
+                train_size=st.session_state.train_size,
+                test_size=st.session_state.test_size,
+                dataset_split_seed=st.session_state.dataset_split_seed,
+            )
 
-        for split in splits_df:
-            st.session_state[f"{split}_dataset"] = splits_df[split]
+            for split in splits_df:
+                st.session_state[f"{split}_dataset"] = splits_df[split]
 
-    if "generation_config" not in st.session_state:
-        st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
+        if "generation_config" not in st.session_state:
+            st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
+
+    except Exception as e:
+        st.error(e)
 
     st.title(TITLE)
 
