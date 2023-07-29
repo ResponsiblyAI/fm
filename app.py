@@ -145,7 +145,7 @@ def escape_markdown(text):
     return "".join([escape_dict.get(c, c) for c in text])
 
 
-def build_api_call_function(model, hf_token=None):
+def build_api_call_function(model):
     if model.startswith("openai") or model.startswith("azure"):
         openai_lib = importlib.import_module("openai")
 
@@ -282,7 +282,7 @@ def build_api_call_function(model, hf_token=None):
             reraise=True,
         )
         async def api_call_function(prompt, generation_config):
-            hf_client = AsyncInferenceClient(token=hf_token, model=model)
+            hf_client = AsyncInferenceClient(token=HF_TOKEN, model=model)
 
             # Reference for decoding stratagies:
             # https://huggingface.co/docs/transformers/generation_strategies
@@ -590,7 +590,7 @@ def main():
 
         if "api_call_function" not in st.session_state:
             st.session_state["api_call_function"] = build_api_call_function(
-                model=HF_MODEL, hf_token=HF_TOKEN
+                model=HF_MODEL,
             )
 
         if "train_dataset" not in st.session_state:
@@ -741,7 +741,6 @@ def main():
 
                 st.session_state["api_call_function"] = build_api_call_function(
                     model=model,
-                    hf_token=HF_TOKEN,
                 )
 
                 st.session_state["generation_config"] = generation_config
