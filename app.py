@@ -200,7 +200,7 @@ def build_api_call_function(model):
                 output = response.choices[0].text
 
             try:
-                length = response.total_tokens
+                length = response.usage.total_tokens
             except AttributeError:
                 length = None
 
@@ -871,7 +871,7 @@ def main():
 
             with st.spinner("Generating..."):
                 try:
-                    output, _ = asyncio.run(
+                    output, length = asyncio.run(
                         complete(
                             st.session_state.api_call_function,
                             prompt,
@@ -881,8 +881,9 @@ def main():
                 except HfHubHTTPError as e:
                     st.error(e)
                     st.stop()
-
             st.markdown(escape_markdown(output))
+            with st.expander("Stats"):
+                st.metric("#Tokens", length)
 
 
 if __name__ == "__main__":
