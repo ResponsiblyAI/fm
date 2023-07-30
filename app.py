@@ -172,7 +172,7 @@ def build_api_call_function(model):
             reraise=True,
         )
         async def api_call_function(prompt, generation_config):
-            if model.startswith("gpt-3.5-turbo") or model.startswith("gpt-4"):
+            if model.startswith("gpt"):
                 response = await openai_lib.ChatCompletion.acreate(
                     engine=engine,
                     model=model,
