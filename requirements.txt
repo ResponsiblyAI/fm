@@ -11,3 +11,4 @@ scikit-learn
 spacy
 streamlit
 tenacity
+transformers

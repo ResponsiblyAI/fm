@@ -30,7 +30,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedShuffleSplit
 from spacy.lang.en import English
 from tenacity import retry, stop_after_attempt, wait_random_exponential
-
+from transformers import pipeline
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,6 +121,38 @@ def get_processing_tokenizer():
 
 
 PROCESSING_TOKENIZER = get_processing_tokenizer()
+
+
+def prepare_huggingface_generation_config(generation_config):
+    generation_config = generation_config.copy()
+
+    # Reference for decoding stratagies:
+    # https://huggingface.co/docs/transformers/generation_strategies
+
+    # `text_generation_interface`
+    # Currenly supports only `greedy` amd `sampling` decoding strategies
+    # Following , we add `do_sample` if any of the other
+    # samling related parameters are set
+    # https://github.com/huggingface/text-generation-inference/blob/e943a294bca239e26828732dd6ab5b6f95dadd0a/server/text_generation_server/utils/tokens.py#L46
+
+    # `transformers`
+    # According to experimentations, it seems that `transformers` behave similarly
+
+    # I'm not sure what is the right behavior here, but it is better to be explicit
+    for name, params in GENERATION_CONFIG_PARAMS.items():
+        # Checking for START to examine the a slider parameters only
+        if (
+            "START" in params
+            and params["SAMPLING"]
+            and name in generation_config
+            and generation_config[name] is not None
+        ):
+            if generation_config[name] == params["DEFAULT"]:
+                generation_config[name] = None
+            else:
+                assert generation_config["do_sample"]
+
+    return generation_config
 
 
 def escape_markdown(text):
@@ -274,6 +306,16 @@ def build_api_call_function(model):
 
             return output, length
 
+    elif model.startswith("#"):
+        model = model[1:]
+        pipe = pipeline("text-generation", model=model, trust_remote_code=True)
+
+        async def api_call_function(prompt, generation_config):
+            generation_config = prepare_huggingface_generation_config(generation_config)
+            return pipe(prompt, return_text=True, **generation_config)[0][
+                "generated_text"
+            ]
+
     else:
 
         @retry(
@@ -284,31 +326,7 @@ def build_api_call_function(model):
         async def api_call_function(prompt, generation_config):
             hf_client = AsyncInferenceClient(token=HF_TOKEN, model=model)
 
-            # Reference for decoding stratagies:
-            # https://huggingface.co/docs/transformers/generation_strategies
-
-            # `text_generation_interface`
-            # Currenly supports only `greedy` amd `sampling` decoding strategies
-            # Following , we add `do_sample` if any of the other
-            # samling related parameters are set
-            # https://github.com/huggingface/text-generation-inference/blob/e943a294bca239e26828732dd6ab5b6f95dadd0a/server/text_generation_server/utils/tokens.py#L46
-
-            # `transformers`
-            # According to experimentations, it seems that `transformers` behave similarly
-
-            # I'm not sure what is the right behavior here, but it is better to be explicit
-            for name, params in GENERATION_CONFIG_PARAMS.items():
-                # Checking for START to examine the a slider parameters only
-                if (
-                    "START" in params
-                    and params["SAMPLING"]
-                    and name in generation_config
-                    and generation_config[name] is not None
-                ):
-                    if generation_config[name] == params["DEFAULT"]:
-                        generation_config[name] = None
-                    else:
-                        assert generation_config["do_sample"]
+            generation_config = prepare_huggingface_generation_config(generation_config)
 
             response = await hf_client.text_generation(
                 prompt, stream=False, details=True, **generation_config
@@ -768,15 +786,19 @@ def main():
 
         with st.expander("Info"):
             try:
+                data_card = dataset_info(st.session_state.dataset_name).cardData
+            except (HFValidationError, RepositoryNotFoundError):
+                pass
+            else:
                 st.caption("Dataset")
-                st.write(dataset_info(st.session_state.dataset_name).cardData)
-            except (HFValidationError, RepositoryNotFoundError):
-                pass
+                st.write(data_card)
             try:
-                st.caption("Model")
-                st.write(model_info(model).cardData)
+                model_card = model_info(model).cardData
             except (HFValidationError, RepositoryNotFoundError):
                 pass
+            else:
+                st.caption("Model")
+                st.write(model_card)
 
             # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
 
