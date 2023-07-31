@@ -916,12 +916,19 @@ def main():
                         st.metric("MCC", f"{evaluation['mcc']:.2f}")
 
                 st.markdown("## Detailed Evaluation")
+
                 st.caption(
-                    "A table of all examples (input and output pairs) used to evaluate the prompt template with the model (e.g., accuracy)."
-                    " It consists of the input placeholder values, the model *output* as-is, the *inference*, and the 'ground-truth' *annotation*."
-                    " A hit is a correct inference (*inference* is the same as *annotation*), a miss is an incorrect inference (otherwise)."
-                    " If the inference could not be determined based on the model output, the *inference* is 'unknown'."
+                    "This table showcases all examples (input and output pairs) that were leveraged for the evaluation of the prompt template with the model (for instance, accuracy)."
+                    " It comprises the input placeholder values, the unmodified model *output*, the deduced *inference*, and the ground-truth *annotation*."
                 )
+                st.caption(
+                    "A 'hit' signifies a correct inference (when *inference* coincides with *annotation*), while a 'miss' denotes an incorrect inference."
+                    " If the *inference* cannot be determined based on the model output, it is labeled as 'unknown'."
+                )
+                st.caption(
+                    "The *prompt* column features the complete prompt that the model was prompted to complete, i.e., your prompt template filled with the input placeholders you have used."
+                )
+
                 st.dataframe(evaluation["hit_miss"])
 
                 with st.expander("Additional Information", expanded=False):
