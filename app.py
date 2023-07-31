@@ -844,11 +844,11 @@ def main():
             is_multi_placeholder = len(st.session_state.input_columns) > 1
 
             st.write(
-                f"To determine the inferred label, the model need to produce one of the following words:"
+                f"To determine the inferred label of an input, the model should output one of the following words:"
                 f" {combine_labels(st.session_state.labels)}"
             )
             st.write(
-                f"The placeholder{'s' if is_multi_placeholder else ''} available for the prompt template {'are' if is_multi_placeholder else 'is'}:"
+                f"The input placeholder{'s' if is_multi_placeholder else ''} available for the prompt template {'are' if is_multi_placeholder else 'is'}:"
                 f" {combine_labels(f'{{{col}}}' for col in st.session_state.input_columns)}"
             )
 
@@ -896,10 +896,15 @@ def main():
                 cols = st.columns(num_metric_cols)
                 with cols[0]:
                     st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
+                    st.caption("The percentage of correct inferences.")
                 with cols[1]:
                     st.metric(
-                        "Unknown Proportion",
+                        "Unknown",
                         f"{100 * evaluation['unknown_proportion']:.0f}%",
+                    )
+                    st.caption(
+                        "The percentage of inferences"
+                        " that could not be determined based on the model output."
                     )
                 if not balancing:
                     with cols[2]:
@@ -910,7 +915,13 @@ def main():
                     with cols[3]:
                         st.metric("MCC", f"{evaluation['mcc']:.2f}")
 
-                st.markdown("## Hits and Misses")
+                st.markdown("## Detailed Evaluation")
+                st.caption(
+                    "A table of all examples (input and output pairs) used to evaluate the prompt template with the model (e.g., accuracy)."
+                    " It consists of the input placeholder values, the model *output* as-is, the *inference*, and the 'ground-truth' *annotation*."
+                    " A hit is a correct inference (*inference* is the same as *annotation*), a miss is an incorrect inference (otherwise)."
+                    " If the inference could not be determined based on the model output, the *inference* is 'unknown'."
+                )
                 st.dataframe(evaluation["hit_miss"])
 
                 with st.expander("Additional Information", expanded=False):
