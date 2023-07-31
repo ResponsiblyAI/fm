@@ -819,7 +819,7 @@ def main():
             is_multi_placeholder = len(st.session_state.input_columns) > 1
 
             st.write(
-                f"To determine the infrared label, the model need to produce one of the following words:"
+                f"To determine the inferred label, the model need to produce one of the following words:"
                 f" {combine_labels(st.session_state.labels)}"
             )
             st.write(
