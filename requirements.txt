@@ -2,6 +2,7 @@ accelerate
 aiohttp
 cohere
 datasets
+einops
 huggingface_hub[inference]
 imbalanced-learn
 numpy
