@@ -1,10 +1,11 @@
 """Prompter."""
 
 import asyncio
+import importlib
 import logging
 import os
 import string
-import importlib
+import sys
 
 import aiohttp
 import cohere
@@ -32,6 +33,8 @@ from spacy.lang.en import English
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from transformers import pipeline
 
+HOW_OPENAI_INITIATED = None
+
 LOGGER = logging.getLogger(__name__)
 
 TITLE = "Prompter"
@@ -42,8 +45,7 @@ HF_TOKEN = st.secrets.get("hf_token", None)
 COHERE_API_KEY = st.secrets.get("cohere_api_key", None)
 AZURE_OPENAI_KEY = st.secrets.get("azure_openai_key", None)
 AZURE_OPENAI_ENDPOINT = st.secrets.get("azure_openai_endpoint", None)
-
-AZURE_DEPLOYMENT_NAME = os.environ.get("AZURE_DEPLOYMENT_NAME", None)
+AZURE_DEPLOYMENT_NAME = st.secrets.get("azure_deployment_name", None)
 
 HF_MODEL = os.environ.get("FM_MODEL", "")
 
@@ -123,6 +125,12 @@ def get_processing_tokenizer():
 PROCESSING_TOKENIZER = get_processing_tokenizer()
 
 
+class OpenAIAlreadyInitiatedError(Exception):
+    """OpenAIAlreadyInitiatedError."""
+
+    pass
+
+
 def prepare_huggingface_generation_config(generation_config):
     generation_config = generation_config.copy()
 
@@ -177,26 +185,39 @@ def escape_markdown(text):
     return "".join([escape_dict.get(c, c) for c in text])
 
 
-def build_api_call_function(model):
-    if model.startswith("openai") or model.startswith("azure"):
-        openai_lib = importlib.import_module("openai")
+def reload_module(name):
+    if name in sys.modules:
+        del sys.modules[name]
+    return importlib.import_module(name)
 
-        if model.startswith("openai"):
-            openai_lib.api_key = OPENAI_API_KEY
+
+def build_api_call_function(model):
+    global HOW_OPENAI_INITIATED
+
+    if model.startswith("openai") or model.startswith("azure"):
+        import openai
+
+        provider, model = model.split("/")
+
+        if provider == "openai":
+            # TODO: how to avoid hardcoding this?
+            # https://github.com/openai/openai-python/blob/b82a3f7e4c462a8a10fa445193301a3cefef9a4a/openai/__init__.py#L49
+            openai.api_type = "open_ai"
+            openai.api_base = "https://api.openai.com/v1"
+            openai.api_version = None
+            openai.api_key = OPENAI_API_KEY
             engine = None
 
-        elif model.startswith("azure"):
-            openai_lib.api_key = AZURE_OPENAI_KEY
-            openai_lib.base = AZURE_OPENAI_ENDPOINT
-            openai_lib.api_type = "azure"
-            openai_lib.api_version = "2023-05-15"
+        elif provider == "azure":
+            openai.api_type = "azure"
+            openai.api_base = AZURE_OPENAI_ENDPOINT
+            openai.api_version = "2023-05-15"
+            openai.api_key = AZURE_OPENAI_KEY
             engine = AZURE_DEPLOYMENT_NAME
 
-        _, model = model.split("/")
-        openai_models = {
-            model_obj["id"] for model_obj in openai_lib.Model.list()["data"]
-        }
+        openai_models = {model_obj["id"] for model_obj in openai.Model.list()["data"]}
         assert model in openai_models
+        LOGGER.info(f"API URL {openai.api_base}")
 
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
@@ -205,7 +226,7 @@ def build_api_call_function(model):
         )
         async def api_call_function(prompt, generation_config):
             if model.startswith("gpt"):
-                response = await openai_lib.ChatCompletion.acreate(
+                response = await openai.ChatCompletion.acreate(
                     engine=engine,
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
@@ -221,7 +242,7 @@ def build_api_call_function(model):
                 output = response["choices"][0]["message"]["content"]
 
             else:
-                response = await openai_lib.Completion.acreate(
+                response = await openai.Completion.acreate(
                     engine=engine,
                     model=model,
                     prompt=prompt,
@@ -765,9 +786,13 @@ def main():
                 st.session_state["train_size"] = train_size
                 st.session_state["test_size"] = test_size
 
-                st.session_state["api_call_function"] = build_api_call_function(
-                    model=model,
-                )
+                try:
+                    st.session_state["api_call_function"] = build_api_call_function(
+                        model=model,
+                    )
+                except OpenAIAlreadyInitiatedError as e:
+                    st.error(e)
+                    st.stop()
 
                 st.session_state["generation_config"] = generation_config
 
@@ -891,7 +916,6 @@ def main():
                 with st.expander("Additional Information", expanded=False):
                     st.markdown("## Confusion Matrix")
                     st.pyplot(evaluation["confusion_matrix_display"])
-
 
                 if evaluation["accuracy"] == 1:
                     st.balloons()
