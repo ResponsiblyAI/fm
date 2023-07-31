@@ -306,15 +306,23 @@ def build_api_call_function(model):
 
             return output, length
 
-    elif model.startswith("#"):
+    elif model.startswith("@"):
         model = model[1:]
-        pipe = pipeline("text-generation", model=model, trust_remote_code=True)
+        pipe = pipeline(
+            "text-generation", model=model, trust_remote_code=True, device_map="auto"
+        )
 
         async def api_call_function(prompt, generation_config):
             generation_config = prepare_huggingface_generation_config(generation_config)
-            return pipe(prompt, return_text=True, **generation_config)[0][
+
+            output = pipe(prompt, return_text=True, **generation_config)[0][
                 "generated_text"
             ]
+            output = output[len(prompt) :]
+
+            length = None
+
+            return output, length
 
     else:
 
@@ -904,8 +912,9 @@ def main():
                     st.error(e)
                     st.stop()
             st.markdown(escape_markdown(output))
-            with st.expander("Stats"):
-                st.metric("#Tokens", length)
+            if length is not None:
+                with st.expander("Stats"):
+                    st.metric("#Tokens", length)
 
 
 if __name__ == "__main__":

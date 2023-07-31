@@ -1,3 +1,4 @@
+accelerate
 aiohttp
 cohere
 datasets
@@ -11,4 +12,5 @@ scikit-learn
 spacy
 streamlit
 tenacity
+torch
 transformers
