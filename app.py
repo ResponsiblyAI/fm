@@ -816,8 +816,16 @@ def main():
         with st.form("prompt_form"):
             prompt_template = st.text_area("Prompt Template", height=PROMPT_TEXT_HEIGHT)
 
-            st.write(f"Labels: {combine_labels(st.session_state.labels)}")
-            st.write(f"Inputs: {combine_labels(st.session_state.input_columns)}")
+            is_multi_placeholder = len(st.session_state.input_columns) > 1
+
+            st.write(
+                f"To determine the infrared label, the model need to produce one of the following words:"
+                f" {combine_labels(st.session_state.labels)}"
+            )
+            st.write(
+                f"The placeholder{'s' if is_multi_placeholder else ''} available for the prompt template {'are' if is_multi_placeholder else 'is'}:"
+                f" {combine_labels(f'{{{col}}}' for col in st.session_state.input_columns)}"
+            )
 
             col1, col2 = st.columns(2)
 
@@ -877,11 +885,13 @@ def main():
                     with cols[3]:
                         st.metric("MCC", f"{evaluation['mcc']:.2f}")
 
-                st.markdown("## Confusion Matrix")
-                st.pyplot(evaluation["confusion_matrix_display"])
-
                 st.markdown("## Hits and Misses")
                 st.dataframe(evaluation["hit_miss"])
+
+                with st.expander("Additional Information", expanded=False):
+                    st.markdown("## Confusion Matrix")
+                    st.pyplot(evaluation["confusion_matrix_display"])
+
 
                 if evaluation["accuracy"] == 1:
                     st.balloons()
