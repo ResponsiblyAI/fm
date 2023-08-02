@@ -892,6 +892,7 @@ def main():
                         st.error(e)
                         st.stop()
 
+                st.markdown("### Metrics")
                 num_metric_cols = 2 if balancing else 4
                 cols = st.columns(num_metric_cols)
                 with cols[0]:
@@ -915,7 +916,7 @@ def main():
                     with cols[3]:
                         st.metric("MCC", f"{evaluation['mcc']:.2f}")
 
-                st.markdown("## Detailed Evaluation")
+                st.markdown("### Detailed Evaluation")
 
                 st.caption(
                     "This table showcases all examples (input and output pairs) that were leveraged for the evaluation of the prompt template with the model (for instance, accuracy)."
