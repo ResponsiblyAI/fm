@@ -928,6 +928,9 @@ def main():
                 st.caption(
                     "The *prompt* column features the complete prompt that the model was prompted to complete, i.e., your prompt template filled with the input placeholders you have used."
                 )
+                st.caption(
+                    "You are not allowed to include these examples in your prompt template."
+                )
 
                 st.dataframe(evaluation["hit_miss"])
 
@@ -939,6 +942,9 @@ def main():
                     st.balloons()
 
     with tab2:
+        st.caption(
+            "You can include the following examples in your prompt template for few-shot prompting."
+        )
         st.dataframe(st.session_state.train_dataset)
 
     with tab3:
