@@ -225,18 +225,22 @@ def build_api_call_function(model):
             reraise=True,
         )
         async def api_call_function(prompt, generation_config):
-            if model.startswith("gpt"):
+            temperature = (
+                generation_config["temperature"]
+                if generation_config["do_sample"]
+                else 0
+            )
+            top_p = generation_config["top_p"] if generation_config["do_sample"] else 1
+            max_tokens = generation_config["max_new_tokens"]
+
+            if model.startswith("gpt") and "instruct" not in model:
                 response = await openai.ChatCompletion.acreate(
                     engine=engine,
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=generation_config["temperature"]
-                    if generation_config["do_sample"]
-                    else 0,
-                    top_p=generation_config["top_p"]
-                    if generation_config["do_sample"]
-                    else 1,
-                    max_tokens=generation_config["max_new_tokens"],
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
                 )
                 assert response["choices"][0]["message"]["role"] == "assistant"
                 output = response["choices"][0]["message"]["content"]
@@ -246,9 +250,9 @@ def build_api_call_function(model):
                     engine=engine,
                     model=model,
                     prompt=prompt,
-                    temperature=generation_config["temperature"],
-                    top_p=generation_config["top_p"],
-                    max_tokens=generation_config["max_new_tokens"],
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
                 )
                 output = response.choices[0].text
 
