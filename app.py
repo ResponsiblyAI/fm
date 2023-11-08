@@ -263,8 +263,10 @@ def build_api_call_function(model):
 
             return output, length
 
-    elif model.startswith("togethercomputer"):
+    elif model.startswith("together"):
         TOGETHER_API_ENDPOINT = "https://api.together.xyz/inference"
+
+        provider, model = model.split("/", maxsplit=1)
 
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
