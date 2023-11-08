@@ -305,7 +305,6 @@ def build_api_call_function(model):
                     return output, length
 
     elif model.startswith("cohere"):
-        co = cohere.Client(COHERE_API_KEY)
         _, model = model.split("/")
 
         @retry(
@@ -313,18 +312,23 @@ def build_api_call_function(model):
             stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
             reraise=True,
         )
-        def api_call_function(prompt, generation_config):
-            response = co.generate(
-                model=model,
-                prompt=prompt,
-                temperature=generation_config["temperature"]
-                if generation_config["do_sample"]
-                else 0,
-                p=generation_config["top_p"] if generation_config["do_sample"] else 1,
-                k=generation_config["top_k"] if generation_config["do_sample"] else 0,
-                max_tokens=generation_config["max_new_tokens"],
-                end_sequences=generation_config["stop_sequences"],
-            )
+        async def api_call_function(prompt, generation_config):
+            async with cohere.AsyncClient(COHERE_API_KEY) as co:
+                response = await co.generate(
+                    model=model,
+                    prompt=prompt,
+                    temperature=generation_config["temperature"]
+                    if generation_config["do_sample"]
+                    else 0,
+                    p=generation_config["top_p"]
+                    if generation_config["do_sample"]
+                    else 1,
+                    k=generation_config["top_k"]
+                    if generation_config["do_sample"]
+                    else 0,
+                    max_tokens=generation_config["max_new_tokens"],
+                    end_sequences=generation_config["stop_sequences"],
+                )
 
             output = response.generations[0].text
             length = None
