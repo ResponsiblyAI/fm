@@ -439,7 +439,7 @@ def prepare_datasets(
         try:
             assert "/" in dataset_name
             dataset_name, subset_name = dataset_name.rsplit("/", 1)
-            ds = load_dataset(dataset_name, subset_name)
+            ds = load_dataset(dataset_name, subset_name, trust_remote_code=True)
         except (FileNotFoundError, AssertionError):
             st.error(f"Dataset `{dataset_name}` not found.")
             st.stop()
