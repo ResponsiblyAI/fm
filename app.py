@@ -160,7 +160,17 @@ def prepare_huggingface_generation_config(generation_config):
             else:
                 assert generation_config["do_sample"]
 
-    return generation_config
+    # TODO: refactor this part
+    if generation_config["is_chat"]:
+        generation_config["max_tokens"] = generation_config.pop("max_new_tokens")
+
+        generation_config["stop"] = generation_config.pop("stop_sequences")
+        del generation_config["do_sample"]
+        del generation_config["top_k"]
+
+    is_chat = generation_config.pop("is_chat")
+
+    return generation_config, is_chat
 
 
 def escape_markdown(text):
@@ -195,29 +205,28 @@ def build_api_call_function(model):
     global HOW_OPENAI_INITIATED
 
     if model.startswith("openai") or model.startswith("azure"):
-        import openai
-
         provider, model = model.split("/")
 
         if provider == "openai":
-            # TODO: how to avoid hardcoding this?
-            # https://github.com/openai/openai-python/blob/b82a3f7e4c462a8a10fa445193301a3cefef9a4a/openai/__init__.py#L49
-            openai.api_type = "open_ai"
-            openai.api_base = "https://api.openai.com/v1"
-            openai.api_version = None
-            openai.api_key = OPENAI_API_KEY
-            engine = None
+            from openai import AsyncOpenAI
+
+            aclient = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
         elif provider == "azure":
-            openai.api_type = "azure"
-            openai.api_base = AZURE_OPENAI_ENDPOINT
-            openai.api_version = "2023-05-15"
-            openai.api_key = AZURE_OPENAI_KEY
-            engine = AZURE_DEPLOYMENT_NAME
+            from openai import AsyncAzureOpenAI
 
-        openai_models = {model_obj["id"] for model_obj in openai.Model.list()["data"]}
+            aclient = AsyncAzureOpenAI(
+                # https://learn.microsoft.com/azure/ai-services/openai/reference#rest-api-versioning
+                api_version="2023-07-01-preview",
+                # https://learn.microsoft.com/azure/cognitive-services/openai/how-to/create-resource?pivots=web-portal#create-a-resource
+                azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            )
+
+        async def list_models():
+            return [model async for model in aclient.models.list()]
+
+        openai_models = {model_obj.id for model_obj in asyncio.run(list_models())}
         assert model in openai_models
-        LOGGER.info(f"API URL {openai.api_base}")
 
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
@@ -234,20 +243,18 @@ def build_api_call_function(model):
             max_tokens = generation_config["max_new_tokens"]
 
             if model.startswith("gpt") and "instruct" not in model:
-                response = await openai.ChatCompletion.acreate(
-                    engine=engine,
+                response = await aclient.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
                 )
-                assert response["choices"][0]["message"]["role"] == "assistant"
-                output = response["choices"][0]["message"]["content"]
+                assert response.choices[0].message.role == "assistant"
+                output = response.choices[0].message.content
 
             else:
-                response = await openai.Completion.acreate(
-                    engine=engine,
+                response = await aclient.completions.create(
                     model=model,
                     prompt=prompt,
                     temperature=temperature,
@@ -344,8 +351,11 @@ def build_api_call_function(model):
         )
 
         async def api_call_function(prompt, generation_config):
-            generation_config = prepare_huggingface_generation_config(generation_config)
+            generation_config, _ = prepare_huggingface_generation_config(
+                generation_config
+            )
 
+            # TODO: include chat
             output = pipe(prompt, return_text=True, **generation_config)[0][
                 "generated_text"
             ]
@@ -365,22 +375,32 @@ def build_api_call_function(model):
         async def api_call_function(prompt, generation_config):
             hf_client = AsyncInferenceClient(token=HF_TOKEN, model=model)
 
-            generation_config = prepare_huggingface_generation_config(generation_config)
-
-            response = await hf_client.text_generation(
-                prompt, stream=False, details=True, **generation_config
+            generation_config, is_chat = prepare_huggingface_generation_config(
+                generation_config
             )
-            LOGGER.info(response)
 
-            length = len(response.details.prefill) + len(response.details.tokens)
+            if is_chat:
+                messages = [{"role": "user", "content": prompt}]
+                response = await hf_client.chat_completion(
+                    messages, stream=False, **generation_config
+                )
+                output = response.choices[0].message.content
+                length = None
 
-            output = response.generated_text
+            else:
+                response = await hf_client.text_generation(
+                    prompt, stream=False, details=True, **generation_config
+                )
 
-            # response = st.session_state.client.post(json={"inputs": prompt})
-            # output = response.json()[0]["generated_text"]
-            # output = st.session_state.client.conversational(prompt, model=model)
-            # output = output if "https" in st.session_state.client.model else output[len(prompt) :]
+                length = (
+                    len(response.details.prefill) + len(response.details.tokens)
+                    if response.details is not None
+                    else None
+                )
 
+                output = response.generated_text
+
+            # TODO: refactor to support stop of chats
             # Remove stop sequences from the output
             # Inspired by
             # https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/inference.py
@@ -836,7 +856,11 @@ def main():
                 st.caption("Dataset")
                 st.write(data_card)
             try:
-                model_card = model_info(model).cardData
+                model_info_respose = model_info(model)
+                model_card = model_info_respose.cardData
+                st.session_state["generation_config"]["is_chat"] = (
+                    "conversational" in model_info_respose.tags
+                )
             except (HFValidationError, RepositoryNotFoundError):
                 pass
             else:
