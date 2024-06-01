@@ -434,7 +434,7 @@ def prepare_datasets(
     dataset_split_seed=None,
 ):
     try:
-        ds = load_dataset(dataset_name)
+        ds = load_dataset(dataset_name, trust_remote_code=True)
     except FileNotFoundError as e:
         try:
             assert "/" in dataset_name
