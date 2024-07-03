@@ -204,8 +204,11 @@ def reload_module(name):
 def build_api_call_function(model):
     global HOW_OPENAI_INITIATED
 
-    if model.startswith("openai") or model.startswith("azure"):
-        provider, model = model.split("/")
+    if any(
+        model.startswith(known_providers)
+        for known_providers in ("openai", "azure", "together")
+    ):
+        provider, model = model.split("/", maxsplit=1)
 
         if provider == "openai":
             from openai import AsyncOpenAI
@@ -222,11 +225,20 @@ def build_api_call_function(model):
                 azure_endpoint=AZURE_OPENAI_ENDPOINT,
             )
 
-        async def list_models():
-            return [model async for model in aclient.models.list()]
+        elif provider == "together":
+            from openai import AsyncOpenAI
 
-        openai_models = {model_obj.id for model_obj in asyncio.run(list_models())}
-        assert model in openai_models
+            aclient = AsyncOpenAI(
+                api_key=TOGETHER_API_KEY, base_url="https://api.together.xyz/v1"
+            )
+
+        if provider in ("openai", "azure"):
+
+            async def list_models():
+                return [model async for model in aclient.models.list()]
+
+            openai_models = {model_obj.id for model_obj in asyncio.run(list_models())}
+            assert model in openai_models
 
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
@@ -242,7 +254,9 @@ def build_api_call_function(model):
             top_p = generation_config["top_p"] if generation_config["do_sample"] else 1
             max_tokens = generation_config["max_new_tokens"]
 
-            if model.startswith("gpt") and "instruct" not in model:
+            if (
+                model.startswith("gpt") and "instruct" not in model
+            ) or provider == "together":
                 response = await aclient.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
@@ -269,49 +283,6 @@ def build_api_call_function(model):
                 length = None
 
             return output, length
-
-    elif model.startswith("together"):
-        TOGETHER_API_ENDPOINT = "https://api.together.xyz/inference"
-
-        provider, model = model.split("/", maxsplit=1)
-
-        @retry(
-            wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
-            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
-            reraise=True,
-        )
-        async def api_call_function(prompt, generation_config):
-            headers = {
-                "Authorization": f"Bearer {TOGETHER_API_KEY}",
-                "User-Agent": "FM",
-            }
-
-            payload = {
-                "temperature": generation_config["temperature"]
-                if generation_config["do_sample"]
-                else 0,
-                "top_p": generation_config["top_p"]
-                if generation_config["do_sample"]
-                else 1,
-                "top_k": generation_config["top_k"]
-                if generation_config["do_sample"]
-                else 0,
-                "max_tokens": generation_config["max_new_tokens"],
-                "prompt": prompt,
-                "model": model,
-                "stop": generation_config["stop_sequences"],
-            }
-
-            LOGGER.info(f"{payload=}")
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    TOGETHER_API_ENDPOINT, json=payload, headers=headers
-                ) as response:
-                    output = (await response.json())["output"]["choices"][0]["text"]
-                    length = None
-
-                    return output, length
 
     elif model.startswith("cohere"):
         _, model = model.split("/")
