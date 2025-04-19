@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from datasets import load_dataset
-from datasets.tasks.text_classification import ClassLabel
+from datasets.features import ClassLabel
 from huggingface_hub import AsyncInferenceClient, dataset_info, model_info
 from huggingface_hub.utils import (
     HfHubHTTPError,
