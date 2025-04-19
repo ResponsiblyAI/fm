@@ -5,7 +5,7 @@ datasets
 einops
 huggingface_hub[inference]
 imbalanced-learn
-numpy
+numpy==1.23.5
 pandas
 matplotlib
 openai
