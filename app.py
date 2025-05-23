@@ -736,8 +736,8 @@ def main():
 
                 if not decoding_seed:
                     decoding_seed = None
-                elif seed.isnumeric():
-                    decoding_seed = int(seed)
+                elif decoding_seed.isnumeric():
+                    decoding_seed = int(decoding_seed)
                 else:
                     st.error("Seed must be numeric or empty.")
                     st.stop()
