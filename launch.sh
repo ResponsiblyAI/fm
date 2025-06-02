@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export FM_MODEL="openai/gpt-3.5-turbo"
+export FM_MODEL="openai/gpt-4.1-nano-2025-04-14"
 export FM_HF_DATASET="shlomihod/civil-comments-wilds"
 export FM_STOP_SEQUENCES=""
 export FM_DATASET_SPLIT_SEED="1"
