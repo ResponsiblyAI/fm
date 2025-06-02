@@ -11,7 +11,7 @@ matplotlib
 openai
 scikit-learn
 spacy
-streamlit
+streamlit==1.20.0
 tenacity
 torch
 transformers

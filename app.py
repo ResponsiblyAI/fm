@@ -1,11 +1,11 @@
 """Prompter."""
 
 import asyncio
-import importlib
 import logging
 import os
-import string
 import sys
+import importlib
+import string
 
 import aiohttp
 import cohere
@@ -66,6 +66,8 @@ UNKNOWN_LABEL = "Unknown"
 
 SEARCH_ROW_DICT = {"First": 0, "Last": -1}
 
+KNOWN_PROVIDERS = ("openai", "azure", "together", "cohere", "@")
+
 # TODO: Change start temperature to 0.0 when HF supports it
 GENERATION_CONFIG_PARAMS = {
     "temperature": {
@@ -107,6 +109,11 @@ GENERATION_CONFIG_PARAMS = {
     "stop_sequences": {
         "NAME": "Stop Sequences",
         "DEFAULT": os.environ.get("FM_STOP_SEQUENCES", "").split(),
+        "SAMPLING": False,
+    },
+    "is_chat": {
+        "NAME": "Is Chat",
+        "DEFAULT": False,
         "SAMPLING": False,
     },
 }
@@ -206,7 +213,7 @@ def build_api_call_function(model):
 
     if any(
         model.startswith(known_providers)
-        for known_providers in ("openai", "azure", "together")
+        for known_providers in KNOWN_PROVIDERS
     ):
         provider, model = model.split("/", maxsplit=1)
 
@@ -220,7 +227,7 @@ def build_api_call_function(model):
 
             aclient = AsyncAzureOpenAI(
                 # https://learn.microsoft.com/azure/ai-services/openai/reference#rest-api-versioning
-                api_version="2023-07-01-preview",
+                api_version="2024-02-01",
                 # https://learn.microsoft.com/azure/cognitive-services/openai/how-to/create-resource?pivots=web-portal#create-a-resource
                 azure_endpoint=AZURE_OPENAI_ENDPOINT,
             )
@@ -316,6 +323,9 @@ def build_api_call_function(model):
             return output, length
 
     elif model.startswith("@"):
+        if not TRANSFORMERS_AVAILABLE:
+            raise ImportError("transformers library is not available. Please install it to use local models (models starting with '@').")
+        
         model = model[1:]
         pipe = pipeline(
             "text-generation", model=model, trust_remote_code=True, device_map="auto"
@@ -477,7 +487,7 @@ def prepare_datasets(
 
 async def complete(api_call_function, prompt, generation_config=None):
     if generation_config is None:
-        generation_config = {}
+        generation_config = GENERATION_CONFIG_DEFAULTS.copy()
 
     LOGGER.info(f"API Call\n\n``{prompt}``\n\n{generation_config=}")
 
@@ -641,28 +651,34 @@ def main():
                 model=HF_MODEL,
             )
 
-        if "train_dataset" not in st.session_state:
-            (
-                st.session_state["dataset_name"],
-                splits_df,
-                st.session_state["input_columns"],
-                st.session_state["label_column"],
-                st.session_state["labels"],
-            ) = prepare_datasets(
-                HF_DATASET,
-                train_size=st.session_state.train_size,
-                test_size=st.session_state.test_size,
-                dataset_split_seed=st.session_state.dataset_split_seed,
-            )
-
-            for split in splits_df:
-                st.session_state[f"{split}_dataset"] = splits_df[split]
-
         if "generation_config" not in st.session_state:
             st.session_state["generation_config"] = GENERATION_CONFIG_DEFAULTS
 
+        # Try to initialize dataset, but don't fail the entire app if it doesn't work
+        if "train_dataset" not in st.session_state and HF_DATASET:
+            try:
+                (
+                    st.session_state["dataset_name"],
+                    splits_df,
+                    st.session_state["input_columns"],
+                    st.session_state["label_column"],
+                    st.session_state["labels"],
+                ) = prepare_datasets(
+                    HF_DATASET,
+                    train_size=st.session_state.train_size,
+                    test_size=st.session_state.test_size,
+                    dataset_split_seed=st.session_state.dataset_split_seed,
+                )
+
+                for split in splits_df:
+                    st.session_state[f"{split}_dataset"] = splits_df[split]
+            except Exception as dataset_error:
+                st.error(f"Failed to load dataset '{HF_DATASET}': {dataset_error}")
+                st.info("You can manually set the dataset in the sidebar form.")
+
     except Exception as e:
-        st.error(e)
+        st.error(f"Initialization error: {e}")
+        st.info("Please configure the model and dataset manually in the sidebar.")
 
     st.title(TITLE)
 
@@ -708,7 +724,7 @@ def main():
 
             decoding_seed = st.text_input("Decoding Seed").strip()
 
-            st.divider()
+            st.markdown("---")
 
             dataset = st.text_input("Dataset", HF_DATASET).strip()
 
@@ -721,7 +737,7 @@ def main():
                 "Dataset Split Seed", DATASET_SPLIT_SEED
             ).strip()
 
-            st.divider()
+            st.markdown("---")
 
             submitted = st.form_submit_button("Set")
 
@@ -781,6 +797,7 @@ def main():
                     do_sample=do_sample,
                     stop_sequences=stop_sequences,
                     seed=decoding_seed,
+                    is_chat=False,  # Will be updated later based on model info
                 )
 
                 st.session_state["dataset_split_seed"] = dataset_split_seed
@@ -820,165 +837,213 @@ def main():
 
         with st.expander("Info"):
             try:
-                data_card = dataset_info(st.session_state.dataset_name).cardData
+                # Check if dataset_name exists in session state before accessing it
+                if hasattr(st.session_state, 'dataset_name'):
+                    data_card = dataset_info(st.session_state.dataset_name, token=HF_TOKEN).cardData
             except (HFValidationError, RepositoryNotFoundError):
                 pass
             else:
                 st.caption("Dataset")
-                st.write(data_card)
-            try:
-                model_info_respose = model_info(model)
-                model_card = model_info_respose.cardData
-                st.session_state["generation_config"]["is_chat"] = (
-                    "conversational" in model_info_respose.tags
-                )
-            except (HFValidationError, RepositoryNotFoundError):
-                pass
+                # Display the dataset card data in a cleaner format
+                if data_card:
+                    try:
+                        # Try to convert to dict if it's not already
+                        if hasattr(data_card, '__dict__'):
+                            data_dict = data_card.__dict__
+                        else:
+                            data_dict = dict(data_card) if data_card else {}
+                        st.json(data_dict)
+                    except (TypeError, ValueError) as e:
+                        # Fallback to text representation if JSON serialization fails
+                        st.text(str(data_card))
+                else:
+                    st.write("No dataset card data available")
+            
+            # Only try to get model info from HuggingFace for non-provider models
+            if not any(model.startswith(known_provider) for known_provider in KNOWN_PROVIDERS):
+                try:
+                    model_info_respose = model_info(model)
+                    model_card = model_info_respose.cardData
+                    st.session_state["generation_config"]["is_chat"] = (
+                        "conversational" in model_info_respose.tags
+                    )
+                except (HFValidationError, RepositoryNotFoundError):
+                    pass
+                else:
+                    st.caption("Model")
+                    # Display the model card data in a cleaner format
+                    if model_card:
+                        try:
+                            # Try to convert to dict if it's not already
+                            if hasattr(model_card, '__dict__'):
+                                model_dict = model_card.__dict__
+                            else:
+                                model_dict = dict(model_card) if model_card else {}
+                            st.json(model_dict)
+                        except (TypeError, ValueError) as e:
+                            # Fallback to text representation if JSON serialization fails
+                            st.text(str(model_card))
+                    else:
+                        st.write("No model card data available")
             else:
-                st.caption("Model")
-                st.write(model_card)
-
-            # st.write(f"Model max length: {AutoTokenizer.from_pretrained(model).model_max_length}")
+                # For provider models, we can't get info from HuggingFace
+                # Set reasonable defaults for chat detection
+                if model.startswith("openai/gpt") and "instruct" not in model:
+                    st.session_state["generation_config"]["is_chat"] = True
+                elif model.startswith("together/") and any(chat_indicator in model for chat_indicator in ["chat", "instruct"]):
+                    st.session_state["generation_config"]["is_chat"] = True
+                else:
+                    st.session_state["generation_config"]["is_chat"] = False
 
     tab1, tab2, tab3 = st.tabs(["Evaluation", "Examples", "Playground"])
 
     with tab1:
-        with st.form("prompt_form"):
-            prompt_template = st.text_area("Prompt Template", height=PROMPT_TEXT_HEIGHT)
+        # Check if required session state variables exist before proceeding
+        if not all(hasattr(st.session_state, attr) for attr in ['input_columns', 'labels']):
+            st.warning("Dataset not loaded. Please configure the dataset in the sidebar and click 'Set'.")
+        else:
+            with st.form("prompt_form"):
+                prompt_template = st.text_area("Prompt Template", height=PROMPT_TEXT_HEIGHT)
 
-            is_multi_placeholder = len(st.session_state.input_columns) > 1
+                is_multi_placeholder = len(st.session_state.input_columns) > 1
 
-            st.write(
-                f"To determine the inferred label of an input, the model should output one of the following words:"
-                f" {combine_labels(st.session_state.labels)}"
-            )
-            st.write(
-                f"The input placeholder{'s' if is_multi_placeholder else ''} available for the prompt template {'are' if is_multi_placeholder else 'is'}:"
-                f" {combine_labels(f'{{{col}}}' for col in st.session_state.input_columns)}"
-            )
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                search_row = st.selectbox(
-                    "Search label at which row", list(SEARCH_ROW_DICT)
+                st.write(
+                    f"To determine the inferred label of an input, the model should output one of the following words:"
+                    f" {combine_labels(st.session_state.labels)}"
+                )
+                st.write(
+                    f"The input placeholder{'s' if is_multi_placeholder else ''} available for the prompt template {'are' if is_multi_placeholder else 'is'}:"
+                    f" {combine_labels(f'{{{col}}}' for col in st.session_state.input_columns)}"
                 )
 
-            with col2:
-                submitted = st.form_submit_button("Evaluate")
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    search_row = st.selectbox(
+                        "Search label at which row", list(SEARCH_ROW_DICT)
+                    )
+
+                with col2:
+                    submitted = st.form_submit_button("Evaluate")
+
+                if submitted:
+                    if not prompt_template:
+                        st.error("Prompt template must be specified.")
+                        st.stop()
+
+                    _, formats, *_ = zip(*string.Formatter().parse(prompt_template))
+                    is_valid_prompt_template = set(formats).issubset(
+                        {None} | set(st.session_state.input_columns)
+                    )
+
+                    if not is_valid_prompt_template:
+                        st.error(f"The prompt template contains unrecognized fields.")
+                        st.stop()
+
+                    with st.spinner("Executing inference..."):
+                        try:
+                            evaluation = run_evaluation(
+                                st.session_state.api_call_function,
+                                prompt_template,
+                                st.session_state.test_dataset,
+                                st.session_state.labels,
+                                st.session_state.label_column,
+                                st.session_state.input_columns,
+                                search_row,
+                                st.session_state.generation_config,
+                            )
+                        except HfHubHTTPError as e:
+                            st.error(e)
+                            st.stop()
+
+                    st.markdown("### Metrics")
+                    num_metric_cols = 2 if balancing else 4
+                    cols = st.columns(num_metric_cols)
+                    with cols[0]:
+                        st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
+                        st.caption("The percentage of correct inferences.")
+                    with cols[1]:
+                        st.metric(
+                            "Unknown",
+                            f"{100 * evaluation['unknown_proportion']:.0f}%",
+                        )
+                        st.caption(
+                            "The percentage of inferences"
+                            " that could not be determined based on the model output."
+                        )
+                    if not balancing:
+                        with cols[2]:
+                            st.metric(
+                                "Balanced Accuracy",
+                                f"{100 * evaluation['balanced_accuracy']:.0f}%",
+                            )
+                        with cols[3]:
+                            st.metric("MCC", f"{evaluation['mcc']:.2f}")
+
+                    st.markdown("### Detailed Evaluation")
+
+                    st.caption(
+                        "This table showcases all examples (input and output pairs) that were leveraged for the evaluation of the prompt template with the model (for instance, accuracy)."
+                        " It comprises the input placeholder values, the unmodified model *output*, the deduced *inference*, and the ground-truth *annotation*."
+                    )
+                    st.caption(
+                        "A 'hit' signifies a correct inference (when *inference* coincides with *annotation*), while a 'miss' denotes an incorrect inference."
+                        " If the *inference* cannot be determined based on the model output, it is labeled as 'unknown'."
+                    )
+                    st.caption(
+                        "The *prompt* column features the complete prompt that the model was prompted to complete, i.e., your prompt template filled with the input placeholders you have used."
+                    )
+                    st.caption(
+                        "You are not allowed to include these examples in your prompt template."
+                    )
+
+                    st.dataframe(evaluation["hit_miss"])
+
+                    with st.expander("Additional Information", expanded=False):
+                        st.markdown("## Confusion Matrix")
+                        st.pyplot(evaluation["confusion_matrix_display"])
+
+                    if evaluation["accuracy"] == 1:
+                        st.balloons()
+
+    with tab2:
+        if not hasattr(st.session_state, 'train_dataset'):
+            st.warning("Training dataset not loaded. Please configure the dataset in the sidebar and click 'Set'.")
+        else:
+            st.caption(
+                "You can include the following examples in your prompt template for few-shot prompting."
+            )
+            st.dataframe(st.session_state.train_dataset)
+
+    with tab3:
+        if not all(hasattr(st.session_state, attr) for attr in ['api_call_function', 'generation_config']):
+            st.warning("Model not configured. Please set up the model in the sidebar and click 'Set'.")
+        else:
+            prompt = st.text_area("Prompt", height=PROMPT_TEXT_HEIGHT)
+
+            submitted = st.button("Complete")
 
             if submitted:
-                if not prompt_template:
-                    st.error("Prompt template must be specified.")
+                if not prompt:
+                    st.error("Prompt must be specified.")
                     st.stop()
 
-                _, formats, *_ = zip(*string.Formatter().parse(prompt_template))
-                is_valid_prompt_template = set(formats).issubset(
-                    {None} | set(st.session_state.input_columns)
-                )
-
-                if not is_valid_prompt_template:
-                    st.error(f"The prompt template contains unrecognized fields.")
-                    st.stop()
-
-                with st.spinner("Executing inference..."):
+                with st.spinner("Generating..."):
                     try:
-                        evaluation = run_evaluation(
-                            st.session_state.api_call_function,
-                            prompt_template,
-                            st.session_state.test_dataset,
-                            st.session_state.labels,
-                            st.session_state.label_column,
-                            st.session_state.input_columns,
-                            search_row,
-                            st.session_state.generation_config,
+                        output, length = asyncio.run(
+                            complete(
+                                st.session_state.api_call_function,
+                                prompt,
+                                st.session_state.generation_config,
+                            )
                         )
                     except HfHubHTTPError as e:
                         st.error(e)
                         st.stop()
-
-                st.markdown("### Metrics")
-                num_metric_cols = 2 if balancing else 4
-                cols = st.columns(num_metric_cols)
-                with cols[0]:
-                    st.metric("Accuracy", f"{100 * evaluation['accuracy']:.0f}%")
-                    st.caption("The percentage of correct inferences.")
-                with cols[1]:
-                    st.metric(
-                        "Unknown",
-                        f"{100 * evaluation['unknown_proportion']:.0f}%",
-                    )
-                    st.caption(
-                        "The percentage of inferences"
-                        " that could not be determined based on the model output."
-                    )
-                if not balancing:
-                    with cols[2]:
-                        st.metric(
-                            "Balanced Accuracy",
-                            f"{100 * evaluation['balanced_accuracy']:.0f}%",
-                        )
-                    with cols[3]:
-                        st.metric("MCC", f"{evaluation['mcc']:.2f}")
-
-                st.markdown("### Detailed Evaluation")
-
-                st.caption(
-                    "This table showcases all examples (input and output pairs) that were leveraged for the evaluation of the prompt template with the model (for instance, accuracy)."
-                    " It comprises the input placeholder values, the unmodified model *output*, the deduced *inference*, and the ground-truth *annotation*."
-                )
-                st.caption(
-                    "A 'hit' signifies a correct inference (when *inference* coincides with *annotation*), while a 'miss' denotes an incorrect inference."
-                    " If the *inference* cannot be determined based on the model output, it is labeled as 'unknown'."
-                )
-                st.caption(
-                    "The *prompt* column features the complete prompt that the model was prompted to complete, i.e., your prompt template filled with the input placeholders you have used."
-                )
-                st.caption(
-                    "You are not allowed to include these examples in your prompt template."
-                )
-
-                st.dataframe(evaluation["hit_miss"])
-
-                with st.expander("Additional Information", expanded=False):
-                    st.markdown("## Confusion Matrix")
-                    st.pyplot(evaluation["confusion_matrix_display"])
-
-                if evaluation["accuracy"] == 1:
-                    st.balloons()
-
-    with tab2:
-        st.caption(
-            "You can include the following examples in your prompt template for few-shot prompting."
-        )
-        st.dataframe(st.session_state.train_dataset)
-
-    with tab3:
-        prompt = st.text_area("Prompt", height=PROMPT_TEXT_HEIGHT)
-
-        submitted = st.button("Complete")
-
-        if submitted:
-            if not prompt:
-                st.error("Prompt must be specified.")
-                st.stop()
-
-            with st.spinner("Generating..."):
-                try:
-                    output, length = asyncio.run(
-                        complete(
-                            st.session_state.api_call_function,
-                            prompt,
-                            st.session_state.generation_config,
-                        )
-                    )
-                except HfHubHTTPError as e:
-                    st.error(e)
-                    st.stop()
-            st.markdown(escape_markdown(output))
-            if length is not None:
-                with st.expander("Stats"):
-                    st.metric("#Tokens", length)
+                st.markdown(escape_markdown(output))
+                if length is not None:
+                    with st.expander("Stats"):
+                        st.metric("#Tokens", length)
 
 
 if __name__ == "__main__":
