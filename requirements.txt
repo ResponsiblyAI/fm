@@ -4,12 +4,12 @@ cohere
 datasets
 einops
 huggingface_hub[inference]
-imbalanced-learn
+imbalanced-learn==0.12.3
 numpy==1.23.5
 pandas
 matplotlib
 openai
-scikit-learn<1.6
+scikit-learn==1.5.2
 spacy
 streamlit==1.20.0
 tenacity
