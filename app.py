@@ -463,16 +463,10 @@ def prepare_datasets(
     df = df[[label_column] + input_columns]
 
     if train_size is not None and test_size is not None:
-        # Try to apply undersampling, but fallback if there are compatibility issues
-        try:
-            undersample = RandomUnderSampler(
-                sampling_strategy="not minority", random_state=dataset_split_seed
-            )
-            df, df[label_column] = undersample.fit_resample(df, df[label_column])
-        except Exception as e:
-            # Log the error and continue without undersampling
-            LOGGER.warning(f"Undersampling failed: {e}. Proceeding without undersampling.")
-        
+        undersample = RandomUnderSampler(
+            sampling_strategy="not minority", random_state=dataset_split_seed
+        )
+        df, df[label_column] = undersample.fit_resample(df, df[label_column])
         sss = StratifiedShuffleSplit(
             n_splits=1,
             train_size=train_size,
