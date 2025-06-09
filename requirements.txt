@@ -9,7 +9,7 @@ numpy==1.23.5
 pandas
 matplotlib
 openai
-scikit-learn
+scikit-learn<1.6
 spacy
 streamlit==1.20.0
 tenacity
