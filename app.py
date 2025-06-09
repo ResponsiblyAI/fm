@@ -226,8 +226,9 @@ def build_api_call_function(model):
             from openai import AsyncAzureOpenAI
 
             aclient = AsyncAzureOpenAI(
+                api_key=AZURE_OPENAI_KEY,
                 # https://learn.microsoft.com/azure/ai-services/openai/reference#rest-api-versioning
-                api_version="2024-02-01",
+                api_version="2025-04-01-preview",
                 # https://learn.microsoft.com/azure/cognitive-services/openai/how-to/create-resource?pivots=web-portal#create-a-resource
                 azure_endpoint=AZURE_OPENAI_ENDPOINT,
             )
@@ -836,30 +837,30 @@ def main():
                 LOGGER.info(f"FORM {generation_config=}")
 
         with st.expander("Info"):
+            data_card = None  # Initialize variable
             try:
                 # Check if dataset_name exists in session state before accessing it
                 if hasattr(st.session_state, 'dataset_name'):
                     data_card = dataset_info(st.session_state.dataset_name, token=HF_TOKEN).cardData
             except (HFValidationError, RepositoryNotFoundError):
                 pass
-            else:
+            
+            # Display dataset info if available
+            if data_card:
                 st.caption("Dataset")
-                # Display the dataset card data in a cleaner format
-                if data_card:
-                    try:
-                        # Try to convert to dict if it's not already
-                        if hasattr(data_card, '__dict__'):
-                            data_dict = data_card.__dict__
-                        else:
-                            data_dict = dict(data_card) if data_card else {}
-                        st.json(data_dict)
-                    except (TypeError, ValueError) as e:
-                        # Fallback to text representation if JSON serialization fails
-                        st.text(str(data_card))
-                else:
-                    st.write("No dataset card data available")
+                try:
+                    # Try to convert to dict if it's not already
+                    if hasattr(data_card, '__dict__'):
+                        data_dict = data_card.__dict__
+                    else:
+                        data_dict = dict(data_card) if data_card else {}
+                    st.json(data_dict)
+                except (TypeError, ValueError) as e:
+                    # Fallback to text representation if JSON serialization fails
+                    st.text(str(data_card))
             
             # Only try to get model info from HuggingFace for non-provider models
+            model_card = None  # Initialize variable
             if not any(model.startswith(known_provider) for known_provider in KNOWN_PROVIDERS):
                 try:
                     model_info_respose = model_info(model)
@@ -869,26 +870,26 @@ def main():
                     )
                 except (HFValidationError, RepositoryNotFoundError):
                     pass
-                else:
+                
+                # Display model info if available
+                if model_card:
                     st.caption("Model")
-                    # Display the model card data in a cleaner format
-                    if model_card:
-                        try:
-                            # Try to convert to dict if it's not already
-                            if hasattr(model_card, '__dict__'):
-                                model_dict = model_card.__dict__
-                            else:
-                                model_dict = dict(model_card) if model_card else {}
-                            st.json(model_dict)
-                        except (TypeError, ValueError) as e:
-                            # Fallback to text representation if JSON serialization fails
-                            st.text(str(model_card))
-                    else:
-                        st.write("No model card data available")
+                    try:
+                        # Try to convert to dict if it's not already
+                        if hasattr(model_card, '__dict__'):
+                            model_dict = model_card.__dict__
+                        else:
+                            model_dict = dict(model_card) if model_card else {}
+                        st.json(model_dict)
+                    except (TypeError, ValueError) as e:
+                        # Fallback to text representation if JSON serialization fails
+                        st.text(str(model_card))
             else:
                 # For provider models, we can't get info from HuggingFace
                 # Set reasonable defaults for chat detection
                 if model.startswith("openai/gpt") and "instruct" not in model:
+                    st.session_state["generation_config"]["is_chat"] = True
+                elif model.startswith("azure/gpt") and "instruct" not in model:
                     st.session_state["generation_config"]["is_chat"] = True
                 elif model.startswith("together/") and any(chat_indicator in model for chat_indicator in ["chat", "instruct"]):
                     st.session_state["generation_config"]["is_chat"] = True
