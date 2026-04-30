@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+.DS_Store
+.streamlit/secrets.toml
+.claude
+.ipynb_checkpoints
+compound-engineering*.md
+smoke_test.py
+.vscode
+.idea

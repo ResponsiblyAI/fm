@@ -3,12 +3,11 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 import importlib
 import string
 
-import aiohttp
-import cohere
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -29,11 +28,7 @@ from sklearn.metrics import (
     matthews_corrcoef,
 )
 from sklearn.model_selection import StratifiedShuffleSplit
-from spacy.lang.en import English
 from tenacity import retry, stop_after_attempt, wait_random_exponential
-from transformers import pipeline
-
-HOW_OPENAI_INITIATED = None
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,8 +36,8 @@ TITLE = "Prompter"
 
 OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
 TOGETHER_API_KEY = st.secrets.get("together_api_key", None)
+OPENROUTER_API_KEY = st.secrets.get("openrouter_api_key", None)
 HF_TOKEN = st.secrets.get("hf_token", None)
-COHERE_API_KEY = st.secrets.get("cohere_api_key", None)
 AZURE_OPENAI_KEY = st.secrets.get("azure_openai_key", None)
 AZURE_OPENAI_ENDPOINT = st.secrets.get("azure_openai_endpoint", None)
 AZURE_DEPLOYMENT_NAME = st.secrets.get("azure_deployment_name", None)
@@ -57,8 +52,8 @@ TEST_SIZE = 25
 BALANCING = True
 
 RETRY_MIN_WAIT = 1
-RETRY_MAX_WAIT = 60
-RETRY_MAX_ATTEMPTS = 6
+RETRY_MAX_WAIT = 10
+RETRY_MAX_ATTEMPTS = 3
 
 PROMPT_TEXT_HEIGHT = 300
 
@@ -66,7 +61,7 @@ UNKNOWN_LABEL = "Unknown"
 
 SEARCH_ROW_DICT = {"First": 0, "Last": -1}
 
-KNOWN_PROVIDERS = ("openai", "azure", "together", "cohere", "@")
+KNOWN_PROVIDERS = ("openai", "azure", "together", "openrouter", "@")
 
 # TODO: Change start temperature to 0.0 when HF supports it
 GENERATION_CONFIG_PARAMS = {
@@ -78,38 +73,17 @@ GENERATION_CONFIG_PARAMS = {
         "STEP": 0.1,
         "SAMPLING": True,
     },
-    "top_k": {
-        "NAME": "Top K",
-        "START": 0,
-        "END": 100,
-        "DEFAULT": 0,
-        "STEP": 10,
-        "SAMPLING": True,
-    },
-    "top_p": {
-        "NAME": "Top P",
-        "START": 0.1,
-        "END": 1.0,
-        "DEFAULT": 1.0,
-        "STEP": 0.1,
-        "SAMPLING": True,
-    },
     "max_new_tokens": {
         "NAME": "Max New Tokens",
         "START": 16,
-        "END": 1024,
-        "DEFAULT": 16,
+        "END": 4096,
+        "DEFAULT": 1024,
         "STEP": 16,
         "SAMPLING": False,
     },
     "do_sample": {
         "NAME": "Sampling",
         "DEFAULT": False,
-    },
-    "stop_sequences": {
-        "NAME": "Stop Sequences",
-        "DEFAULT": os.environ.get("FM_STOP_SEQUENCES", "").split(),
-        "SAMPLING": False,
     },
     "is_chat": {
         "NAME": "Is Chat",
@@ -123,19 +97,6 @@ GENERATION_CONFIG_DEFAULTS = {
 }
 
 st.set_page_config(page_title=TITLE, initial_sidebar_state="collapsed")
-
-
-def get_processing_tokenizer():
-    return English().tokenizer
-
-
-PROCESSING_TOKENIZER = get_processing_tokenizer()
-
-
-class OpenAIAlreadyInitiatedError(Exception):
-    """OpenAIAlreadyInitiatedError."""
-
-    pass
 
 
 def prepare_huggingface_generation_config(generation_config):
@@ -167,39 +128,13 @@ def prepare_huggingface_generation_config(generation_config):
             else:
                 assert generation_config["do_sample"]
 
-    # TODO: refactor this part
     if generation_config["is_chat"]:
         generation_config["max_tokens"] = generation_config.pop("max_new_tokens")
-
-        generation_config["stop"] = generation_config.pop("stop_sequences")
         del generation_config["do_sample"]
-        del generation_config["top_k"]
 
     is_chat = generation_config.pop("is_chat")
 
     return generation_config, is_chat
-
-
-def escape_markdown(text):
-    escape_dict = {
-        "*": r"\*",
-        "_": r"\_",
-        "{": r"\{",
-        "}": r"\}",
-        "[": r"\[",
-        "]": r"\]",
-        "(": r"\(",
-        ")": r"\)",
-        "+": r"\+",
-        "-": r"\-",
-        ".": r"\.",
-        "!": r"\!",
-        "`": r"\`",
-        ">": r"\>",
-        "|": r"\|",
-        "#": r"\#",
-    }
-    return "".join([escape_dict.get(c, c) for c in text])
 
 
 def reload_module(name):
@@ -209,8 +144,6 @@ def reload_module(name):
 
 
 def build_api_call_function(model):
-    global HOW_OPENAI_INITIATED
-
     if any(
         model.startswith(known_providers)
         for known_providers in KNOWN_PROVIDERS
@@ -240,13 +173,13 @@ def build_api_call_function(model):
                 api_key=TOGETHER_API_KEY, base_url="https://api.together.xyz/v1"
             )
 
-        if provider in ("openai", "azure"):
+        elif provider == "openrouter":
+            from openai import AsyncOpenAI
 
-            async def list_models():
-                return [model async for model in aclient.models.list()]
-
-            openai_models = {model_obj.id for model_obj in asyncio.run(list_models())}
-            assert model in openai_models
+            aclient = AsyncOpenAI(
+                api_key=OPENROUTER_API_KEY,
+                base_url="https://openrouter.ai/api/v1",
+            )
 
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
@@ -259,28 +192,28 @@ def build_api_call_function(model):
                 if generation_config["do_sample"]
                 else 0
             )
-            top_p = generation_config["top_p"] if generation_config["do_sample"] else 1
             max_tokens = generation_config["max_new_tokens"]
 
             if (
                 model.startswith("gpt") and "instruct" not in model
-            ) or provider == "together":
+            ) or provider in ("together", "openrouter"):
+                extra_kwargs = {}
+                if provider == "openrouter":
+                    extra_kwargs["extra_body"] = {"reasoning": {"exclude": True}}
                 response = await aclient.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
-                    top_p=top_p,
                     max_tokens=max_tokens,
+                    **extra_kwargs,
                 )
-                assert response.choices[0].message.role == "assistant"
-                output = response.choices[0].message.content
+                output = response.choices[0].message.content or ""
 
             else:
                 response = await aclient.completions.create(
                     model=model,
                     prompt=prompt,
                     temperature=temperature,
-                    top_p=top_p,
                     max_tokens=max_tokens,
                 )
                 output = response.choices[0].text
@@ -292,41 +225,9 @@ def build_api_call_function(model):
 
             return output, length
 
-    elif model.startswith("cohere"):
-        _, model = model.split("/")
-
-        @retry(
-            wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
-            stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
-            reraise=True,
-        )
-        async def api_call_function(prompt, generation_config):
-            async with cohere.AsyncClient(COHERE_API_KEY) as co:
-                response = await co.generate(
-                    model=model,
-                    prompt=prompt,
-                    temperature=generation_config["temperature"]
-                    if generation_config["do_sample"]
-                    else 0,
-                    p=generation_config["top_p"]
-                    if generation_config["do_sample"]
-                    else 1,
-                    k=generation_config["top_k"]
-                    if generation_config["do_sample"]
-                    else 0,
-                    max_tokens=generation_config["max_new_tokens"],
-                    end_sequences=generation_config["stop_sequences"],
-                )
-
-            output = response.generations[0].text
-            length = None
-
-            return output, length
-
     elif model.startswith("@"):
-        if not TRANSFORMERS_AVAILABLE:
-            raise ImportError("transformers library is not available. Please install it to use local models (models starting with '@').")
-        
+        from transformers import pipeline
+
         model = model[1:]
         pipe = pipeline(
             "text-generation", model=model, trust_remote_code=True, device_map="auto"
@@ -336,16 +237,18 @@ def build_api_call_function(model):
             generation_config, _ = prepare_huggingface_generation_config(
                 generation_config
             )
+            seed = generation_config.pop("seed", None)
+            if seed is not None:
+                from transformers import set_seed
 
-            # TODO: include chat
+                set_seed(seed)
+
             output = pipe(prompt, return_text=True, **generation_config)[0][
                 "generated_text"
             ]
             output = output[len(prompt) :]
 
-            length = None
-
-            return output, length
+            return output, None
 
     else:
 
@@ -382,18 +285,6 @@ def build_api_call_function(model):
 
                 output = response.generated_text
 
-            # TODO: refactor to support stop of chats
-            # Remove stop sequences from the output
-            # Inspired by
-            # https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/inference.py
-            # https://huggingface.co/spaces/tiiuae/falcon-chat/blob/main/app.py
-            if (
-                "stop_sequences" in generation_config
-                and generation_config["stop_sequences"] is not None
-            ):
-                for stop_sequence in generation_config["stop_sequences"]:
-                    output = output.rsplit(stop_sequence, maxsplit=1)[0]
-
             return output, length
 
     return api_call_function
@@ -417,12 +308,15 @@ def prepare_datasets(
 ):
     try:
         ds = load_dataset(dataset_name, trust_remote_code=True)
-    except FileNotFoundError as e:
-        try:
-            assert "/" in dataset_name
+    except FileNotFoundError:
+        if "/" in dataset_name:
             dataset_name, subset_name = dataset_name.rsplit("/", 1)
-            ds = load_dataset(dataset_name, subset_name, trust_remote_code=True)
-        except (FileNotFoundError, AssertionError):
+            try:
+                ds = load_dataset(dataset_name, subset_name, trust_remote_code=True)
+            except FileNotFoundError:
+                st.error(f"Dataset `{dataset_name}` not found.")
+                st.stop()
+        else:
             st.error(f"Dataset `{dataset_name}` not found.")
             st.stop()
 
@@ -431,16 +325,22 @@ def prepare_datasets(
         for name, info in ds["train"].features.items()
         if isinstance(info, ClassLabel)
     ]
-    assert len(label_columns) == 1
+    if len(label_columns) != 1:
+        st.error(
+            f"Dataset must have exactly one ClassLabel column; found {len(label_columns)}."
+        )
+        st.stop()
     label_column, label_column_info = label_columns[0]
     labels = [normalize(label) for label in label_column_info.names]
     label_dict = dict(enumerate(labels))
 
-    if any(len(PROCESSING_TOKENIZER(label)) > 1 for label in labels):
+    bad_labels = [label for label in labels if not re.fullmatch(r"\w+", label)]
+    if bad_labels:
         st.error(
-            "Labels are not single words. "
-            "Matching labels won't not work as expected."
+            f"Label matching requires single-word labels matching `\\w+`. "
+            f"Offending labels: {bad_labels}"
         )
+        st.stop()
 
     original_input_columns = [
         name
@@ -519,11 +419,7 @@ async def infer_multi(
 
 
 def preprocess_output_line(text):
-    return [
-        normalize(token_str)
-        for token in PROCESSING_TOKENIZER(text)
-        if (token_str := str(token))
-    ]
+    return [normalize(token) for token in re.findall(r"\w+", text)]
 
 
 # Inspired by OpenAI depcriated classification endpoint API
@@ -673,12 +569,14 @@ def main():
 
                 for split in splits_df:
                     st.session_state[f"{split}_dataset"] = splits_df[split]
-            except Exception as dataset_error:
-                st.error(f"Failed to load dataset '{HF_DATASET}': {dataset_error}")
+            except Exception:
+                LOGGER.exception("Failed to load dataset %s", HF_DATASET)
+                st.error(f"Failed to load dataset `{HF_DATASET}`. See server logs.")
                 st.info("You can manually set the dataset in the sidebar form.")
 
-    except Exception as e:
-        st.error(f"Initialization error: {e}")
+    except Exception:
+        LOGGER.exception("Initialization error")
+        st.error("Initialization error. See server logs.")
         st.info("Please configure the model and dataset manually in the sidebar.")
 
     st.title(TITLE)
@@ -686,12 +584,6 @@ def main():
     with st.sidebar:
         with st.form("model_form"):
             model = st.text_input("Model", HF_MODEL).strip()
-
-            # Defautlt values from:
-            # https://huggingface.co/docs/transformers/v4.30.0/main_classes/text_generation
-            # Edges values from:
-            # https://docs.cohere.com/reference/generate
-            # https://platform.openai.com/playground
 
             generation_config_sliders = {
                 name: st.slider(
@@ -709,19 +601,6 @@ def main():
                 GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
                 value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
             )
-
-            stop_sequences = st.text_area(
-                GENERATION_CONFIG_PARAMS["stop_sequences"]["NAME"],
-                value="\n".join(GENERATION_CONFIG_PARAMS["stop_sequences"]["DEFAULT"]),
-            )
-
-            stop_sequences = [
-                clean_stop.encode().decode("unicode_escape")  # interpret \n as newline
-                for stop in stop_sequences.split("\n")
-                if (clean_stop := stop.strip())
-            ]
-            if not stop_sequences:
-                stop_sequences = None
 
             decoding_seed = st.text_input("Decoding Seed").strip()
 
@@ -796,7 +675,6 @@ def main():
 
                 generation_config = generation_config_sliders | dict(
                     do_sample=do_sample,
-                    stop_sequences=stop_sequences,
                     seed=decoding_seed,
                     is_chat=False,  # Will be updated later based on model info
                 )
@@ -805,13 +683,9 @@ def main():
                 st.session_state["train_size"] = train_size
                 st.session_state["test_size"] = test_size
 
-                try:
-                    st.session_state["api_call_function"] = build_api_call_function(
-                        model=model,
-                    )
-                except OpenAIAlreadyInitiatedError as e:
-                    st.error(e)
-                    st.stop()
+                st.session_state["api_call_function"] = build_api_call_function(
+                    model=model,
+                )
 
                 st.session_state["generation_config"] = generation_config
 
@@ -893,6 +767,8 @@ def main():
                     st.session_state["generation_config"]["is_chat"] = True
                 elif model.startswith("together/") and any(chat_indicator in model for chat_indicator in ["chat", "instruct"]):
                     st.session_state["generation_config"]["is_chat"] = True
+                elif model.startswith("openrouter/"):
+                    st.session_state["generation_config"]["is_chat"] = True
                 else:
                     st.session_state["generation_config"]["is_chat"] = False
 
@@ -953,8 +829,9 @@ def main():
                                 search_row,
                                 st.session_state.generation_config,
                             )
-                        except HfHubHTTPError as e:
-                            st.error(e)
+                        except HfHubHTTPError:
+                            LOGGER.exception("HF Hub error during evaluation")
+                            st.error("Provider error during evaluation. See server logs.")
                             st.stop()
 
                     st.markdown("### Metrics")
@@ -1038,15 +915,16 @@ def main():
                                 st.session_state.generation_config,
                             )
                         )
-                    except HfHubHTTPError as e:
-                        st.error(e)
+                    except HfHubHTTPError:
+                        LOGGER.exception("HF Hub error during playground completion")
+                        st.error("Provider error. See server logs.")
                         st.stop()
-                st.markdown(escape_markdown(output))
+                st.code(output, language=None, wrap_lines=True)
                 if length is not None:
                     with st.expander("Stats"):
                         st.metric("#Tokens", length)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     main()
