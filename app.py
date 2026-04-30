@@ -34,13 +34,25 @@ LOGGER = logging.getLogger(__name__)
 
 TITLE = "Prompter"
 
-OPENAI_API_KEY = st.secrets.get("openai_api_key", None)
-TOGETHER_API_KEY = st.secrets.get("together_api_key", None)
-OPENROUTER_API_KEY = st.secrets.get("openrouter_api_key", None)
-HF_TOKEN = st.secrets.get("hf_token", None)
-AZURE_OPENAI_KEY = st.secrets.get("azure_openai_key", None)
-AZURE_OPENAI_ENDPOINT = st.secrets.get("azure_openai_endpoint", None)
-AZURE_DEPLOYMENT_NAME = st.secrets.get("azure_deployment_name", None)
+
+def get_secret(key):
+    if (val := os.environ.get(key.upper())) is not None:
+        return val
+    if (val := os.environ.get(key)) is not None:
+        return val
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
+
+OPENAI_API_KEY = get_secret("openai_api_key")
+TOGETHER_API_KEY = get_secret("together_api_key")
+OPENROUTER_API_KEY = get_secret("openrouter_api_key")
+HF_TOKEN = get_secret("hf_token")
+AZURE_OPENAI_KEY = get_secret("azure_openai_key")
+AZURE_OPENAI_ENDPOINT = get_secret("azure_openai_endpoint")
+AZURE_DEPLOYMENT_NAME = get_secret("azure_deployment_name")
 
 HF_MODEL = os.environ.get("FM_MODEL", "")
 
