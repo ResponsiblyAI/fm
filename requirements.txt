@@ -1,5 +1,5 @@
 accelerate
-datasets
+datasets<4
 einops
 huggingface_hub
 imbalanced-learn>=0.13
