@@ -88,9 +88,15 @@ GENERATION_CONFIG_PARAMS = {
     "max_new_tokens": {
         "NAME": "Max New Tokens",
         "START": 16,
-        "END": 4096,
-        "DEFAULT": 1024,
+        "END": 8192,
+        "DEFAULT": 2048,
         "STEP": 16,
+        "SAMPLING": False,
+    },
+    "reasoning_effort": {
+        "NAME": "Reasoning Effort",
+        "OPTIONS": ["none", "low", "medium", "high"],
+        "DEFAULT": "low",
         "SAMPLING": False,
     },
     "do_sample": {
@@ -210,8 +216,16 @@ def build_api_call_function(model):
                 model.startswith("gpt") and "instruct" not in model
             ) or provider in ("together", "openrouter"):
                 extra_kwargs = {}
+                effort = generation_config.get("reasoning_effort", "none")
+
                 if provider == "openrouter":
-                    extra_kwargs["extra_body"] = {"reasoning": {"exclude": True}}
+                    reasoning_payload = {"exclude": True}
+                    if effort != "none":
+                        reasoning_payload["effort"] = effort
+                    extra_kwargs["extra_body"] = {"reasoning": reasoning_payload}
+                elif provider in ("openai", "azure") and effort != "none":
+                    extra_kwargs["reasoning_effort"] = effort
+
                 response = await aclient.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
@@ -609,6 +623,19 @@ def main():
                 if "START" in params
             }
 
+            reasoning_effort = st.selectbox(
+                GENERATION_CONFIG_PARAMS["reasoning_effort"]["NAME"],
+                options=GENERATION_CONFIG_PARAMS["reasoning_effort"]["OPTIONS"],
+                index=GENERATION_CONFIG_PARAMS["reasoning_effort"]["OPTIONS"].index(
+                    GENERATION_CONFIG_PARAMS["reasoning_effort"]["DEFAULT"]
+                ),
+                help=(
+                    "For OpenRouter/OpenAI/Azure reasoning models (gpt-oss, o-series, gpt-5). "
+                    "Select 'none' for non-reasoning models (gpt-4o, gpt-4, llama, etc.) — "
+                    "OpenAI and Azure return 400 if reasoning_effort is sent to them."
+                ),
+            )
+
             do_sample = st.checkbox(
                 GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
                 value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
@@ -689,6 +716,7 @@ def main():
                     do_sample=do_sample,
                     seed=decoding_seed,
                     is_chat=False,  # Will be updated later based on model info
+                    reasoning_effort=reasoning_effort,
                 )
 
                 st.session_state["dataset_split_seed"] = dataset_split_seed
