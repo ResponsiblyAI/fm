@@ -886,6 +886,10 @@ def main():
                             LOGGER.exception("HF Hub error during evaluation")
                             st.error("Provider error during evaluation. See server logs.")
                             st.stop()
+                        except RuntimeError as e:
+                            LOGGER.exception("Runtime error during evaluation")
+                            st.error(str(e))
+                            st.stop()
 
                     st.markdown("### Metrics")
                     num_metric_cols = 2 if balancing else 4
@@ -971,6 +975,10 @@ def main():
                     except HfHubHTTPError:
                         LOGGER.exception("HF Hub error during playground completion")
                         st.error("Provider error. See server logs.")
+                        st.stop()
+                    except RuntimeError as e:
+                        LOGGER.exception("Runtime error during playground completion")
+                        st.error(str(e))
                         st.stop()
                 st.code(output, language=None, wrap_lines=True)
                 if length is not None:
