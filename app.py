@@ -226,13 +226,26 @@ def build_api_call_function(model):
                 elif provider in ("openai", "azure") and effort != "none":
                     extra_kwargs["reasoning_effort"] = effort
 
-                response = await aclient.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **extra_kwargs,
-                )
+                try:
+                    response = await aclient.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **extra_kwargs,
+                    )
+                except Exception as e:
+                    if (
+                        extra_kwargs.get("reasoning_effort")
+                        and "reasoning_effort" in str(e)
+                    ):
+                        raise RuntimeError(
+                            f"{provider}/{model} is not a reasoning model — it rejected "
+                            f"reasoning_effort={effort!r}. Set Reasoning Effort to 'none' "
+                            "in the sidebar for non-reasoning models "
+                            "(gpt-4o, gpt-4, llama, etc.)."
+                        ) from e
+                    raise
                 output = response.choices[0].message.content or ""
 
             else:
