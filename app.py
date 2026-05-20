@@ -53,6 +53,8 @@ HF_TOKEN = get_secret("hf_token")
 AZURE_OPENAI_KEY = get_secret("azure_openai_key")
 AZURE_OPENAI_ENDPOINT = get_secret("azure_openai_endpoint")
 AZURE_DEPLOYMENT_NAME = get_secret("azure_deployment_name")
+AZUREML_ENDPOINT = get_secret("azureml_endpoint")
+AZUREML_KEY = get_secret("azureml_key")
 
 HF_MODEL = os.environ.get("FM_MODEL", "")
 
@@ -73,23 +75,22 @@ UNKNOWN_LABEL = "Unknown"
 
 SEARCH_ROW_DICT = {"First": 0, "Last": -1}
 
-KNOWN_PROVIDERS = ("openai", "azure", "together", "openrouter", "@")
+KNOWN_PROVIDERS = ("openai", "azure", "together", "openrouter", "azureml", "@")
 
 # TODO: Change start temperature to 0.0 when HF supports it
 GENERATION_CONFIG_PARAMS = {
     "temperature": {
         "NAME": "Temperature",
-        "START": 0.1,
-        "END": 5.0,
+        "MIN": 0.1,
+        "MAX": 5.0,
         "DEFAULT": 1.0,
         "STEP": 0.1,
         "SAMPLING": True,
     },
     "max_new_tokens": {
-        "NAME": "Max New Tokens",
-        "START": 16,
-        "END": 8192,
-        "DEFAULT": 2048,
+        "NAME": "Max Tokens",
+        "MIN": 0,
+        "DEFAULT": 2**16,
         "STEP": 16,
         "SAMPLING": False,
     },
@@ -134,9 +135,9 @@ def prepare_huggingface_generation_config(generation_config):
 
     # I'm not sure what is the right behavior here, but it is better to be explicit
     for name, params in GENERATION_CONFIG_PARAMS.items():
-        # Checking for START to examine the a slider parameters only
+        # Only consider params that have a numeric range (i.e., slider/number inputs)
         if (
-            "START" in params
+            "MIN" in params
             and params["SAMPLING"]
             and name in generation_config
             and generation_config[name] is not None
@@ -188,7 +189,7 @@ def build_api_call_function(model):
             from openai import AsyncOpenAI
 
             aclient = AsyncOpenAI(
-                api_key=TOGETHER_API_KEY, base_url="https://api.together.xyz/v1"
+                api_key=TOGETHER_API_KEY, base_url="https://api.together.ai/v1"
             )
 
         elif provider == "openrouter":
@@ -198,6 +199,62 @@ def build_api_call_function(model):
                 api_key=OPENROUTER_API_KEY,
                 base_url="https://openrouter.ai/api/v1",
             )
+
+        elif provider == "azureml":
+            import httpx
+
+            if not AZUREML_ENDPOINT or not AZUREML_KEY:
+                raise RuntimeError(
+                    "azureml/ provider selected but azureml_endpoint or "
+                    "azureml_key is not configured. Set them in "
+                    ".streamlit/secrets.toml or via env vars."
+                )
+
+            azureml_client = httpx.AsyncClient(
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {AZUREML_KEY}",
+                },
+                # pool=None lets requests queue indefinitely for the single connection;
+                # max_connections=1 serializes calls to stay under Azure ML's per-deployment cap.
+                timeout=httpx.Timeout(60.0, pool=None),
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            )
+
+            @retry(
+                wait=wait_random_exponential(
+                    min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT
+                ),
+                stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
+                reraise=True,
+            )
+            async def api_call_function(prompt, generation_config):
+                temperature = (
+                    generation_config["temperature"]
+                    if generation_config["do_sample"]
+                    else 0
+                )
+                parameters = {"temperature": temperature}
+                if generation_config["max_new_tokens"]:
+                    parameters["max_tokens"] = generation_config["max_new_tokens"]
+                payload = {
+                    "input_data": {
+                        "input_string": [{"role": "user", "content": prompt}],
+                        "parameters": parameters,
+                    }
+                }
+                response = await azureml_client.post(AZUREML_ENDPOINT, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict) or "output" not in data:
+                    raise RuntimeError(
+                        "azureml endpoint returned an unexpected response "
+                        f"shape (no 'output' key): {str(data)[:300]}"
+                    )
+                _analysis, final = split_harmony_output(data["output"])
+                return final, None
+
+            return api_call_function
 
         @retry(
             wait=wait_random_exponential(min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
@@ -210,7 +267,7 @@ def build_api_call_function(model):
                 if generation_config["do_sample"]
                 else 0
             )
-            max_tokens = generation_config["max_new_tokens"]
+            max_tokens = generation_config["max_new_tokens"] or None
 
             if (
                 model.startswith("gpt") and "instruct" not in model
@@ -223,7 +280,12 @@ def build_api_call_function(model):
                     if effort != "none":
                         reasoning_payload["effort"] = effort
                     extra_kwargs["extra_body"] = {"reasoning": reasoning_payload}
-                elif provider in ("openai", "azure") and effort != "none":
+                elif (
+                    provider in ("openai", "azure", "together")
+                    and effort != "none"
+                ):
+                    # Together's OpenAI-compatible API accepts reasoning_effort
+                    # (low/medium/high) as a top-level param on reasoning models.
                     extra_kwargs["reasoning_effort"] = effort
 
                 try:
@@ -327,6 +389,22 @@ def build_api_call_function(model):
             return output, length
 
     return api_call_function
+
+
+def split_harmony_output(text):
+    # gpt-oss models emit Harmony channels with special tokens
+    # (<|channel|>analysis<|message|>...<|start|>assistant<|channel|>final<|message|>...).
+    # The Azure ML score.py wrapper decodes with skip_special_tokens=True, so all
+    # we see is the channel names inlined as plain text:
+    #   "analysis<reasoning>assistantfinal<answer>"
+    # openai-harmony can't parse this (it needs token IDs we don't get back).
+    idx = text.find("assistantfinal")
+    if idx == -1:
+        # No "final" channel marker -> not Harmony-formatted (or truncated
+        # before it). Return the text unchanged rather than risk stripping a
+        # genuine leading "analysis" word from a non-Harmony model's output.
+        return "", text
+    return text[:idx].removeprefix("analysis"), text[idx + len("assistantfinal"):]
 
 
 def strip_newline_space(text):
@@ -627,14 +705,21 @@ def main():
             generation_config_sliders = {
                 name: st.slider(
                     params["NAME"],
-                    params["START"],
-                    params["END"],
+                    params["MIN"],
+                    params["MAX"],
                     params["DEFAULT"],
                     params["STEP"],
                 )
                 for name, params in GENERATION_CONFIG_PARAMS.items()
-                if "START" in params
+                if "MAX" in params
             }
+            generation_config_sliders["max_new_tokens"] = st.number_input(
+                GENERATION_CONFIG_PARAMS["max_new_tokens"]["NAME"],
+                min_value=GENERATION_CONFIG_PARAMS["max_new_tokens"]["MIN"],
+                value=GENERATION_CONFIG_PARAMS["max_new_tokens"]["DEFAULT"],
+                step=GENERATION_CONFIG_PARAMS["max_new_tokens"]["STEP"],
+                help="0 = no limit (let the server use its default / full context).",
+            )
 
             reasoning_effort = st.selectbox(
                 GENERATION_CONFIG_PARAMS["reasoning_effort"]["NAME"],
@@ -643,9 +728,10 @@ def main():
                     GENERATION_CONFIG_PARAMS["reasoning_effort"]["DEFAULT"]
                 ),
                 help=(
-                    "For OpenRouter/OpenAI/Azure reasoning models (gpt-oss, o-series, gpt-5). "
+                    "For OpenRouter/OpenAI/Azure/Together reasoning models (gpt-oss, o-series, gpt-5). "
                     "Select 'none' for non-reasoning models (gpt-4o, gpt-4, llama, etc.) — "
-                    "OpenAI and Azure return 400 if reasoning_effort is sent to them."
+                    "OpenAI and Azure return 400 if reasoning_effort is sent to them; "
+                    "Together silently ignores it on non-reasoning models."
                 ),
             )
 
@@ -821,6 +907,8 @@ def main():
                 elif model.startswith("together/") and any(chat_indicator in model for chat_indicator in ["chat", "instruct"]):
                     st.session_state["generation_config"]["is_chat"] = True
                 elif model.startswith("openrouter/"):
+                    st.session_state["generation_config"]["is_chat"] = True
+                elif model.startswith("azureml/"):
                     st.session_state["generation_config"]["is_chat"] = True
                 else:
                     st.session_state["generation_config"]["is_chat"] = False
