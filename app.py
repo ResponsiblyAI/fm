@@ -693,14 +693,17 @@ def main():
     st.title(TITLE)
 
     with st.sidebar:
+        # Sampling checkbox lives outside the form so toggling it triggers
+        # an immediate rerun and the Temperature slider greys/un-greys live.
+        # (Streamlit form widgets do not trigger reruns on interaction.)
+        do_sample = st.checkbox(
+            GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
+            value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
+            help="When off, temperature is forced to 0 (or greedy decoding for local HF models).",
+        )
+
         with st.form("model_form"):
             model = st.text_input("Model", HF_MODEL).strip()
-
-            do_sample = st.checkbox(
-                GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
-                value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
-                help="When off, temperature is forced to 0 (or greedy decoding for local HF models).",
-            )
 
             generation_config_sliders = {
                 name: st.slider(
