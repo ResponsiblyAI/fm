@@ -1,7 +1,7 @@
 #!/bin/bash
 
 export FM_MODEL="openrouter/openai/gpt-oss-20b"
-export FM_HF_DATASET="itavdan/legal-advice"
+export FM_HF_DATASET="itavdan/hard-legal-advice"
 export FM_DATASET_SPLIT_SEED="1"
 
 # Disable PyTorch warnings and problematic behaviors

@@ -134,6 +134,7 @@ def prepare_huggingface_generation_config(generation_config):
     # According to experimentations, it seems that `transformers` behave similarly
 
     # I'm not sure what is the right behavior here, but it is better to be explicit
+    do_sample = generation_config["do_sample"]
     for name, params in GENERATION_CONFIG_PARAMS.items():
         # Only consider params that have a numeric range (i.e., slider/number inputs)
         if (
@@ -142,10 +143,8 @@ def prepare_huggingface_generation_config(generation_config):
             and name in generation_config
             and generation_config[name] is not None
         ):
-            if generation_config[name] == params["DEFAULT"]:
+            if not do_sample or generation_config[name] == params["DEFAULT"]:
                 generation_config[name] = None
-            else:
-                assert generation_config["do_sample"]
 
     if generation_config["is_chat"]:
         generation_config["max_tokens"] = generation_config.pop("max_new_tokens")
@@ -338,11 +337,6 @@ def build_api_call_function(model):
             generation_config, _ = prepare_huggingface_generation_config(
                 generation_config
             )
-            seed = generation_config.pop("seed", None)
-            if seed is not None:
-                from transformers import set_seed
-
-                set_seed(seed)
 
             output = pipe(prompt, return_text=True, **generation_config)[0][
                 "generated_text"
@@ -699,6 +693,12 @@ def main():
     st.title(TITLE)
 
     with st.sidebar:
+        do_sample = st.checkbox(
+            GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
+            value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
+            help="When off, temperature is forced to 0 (or greedy decoding for local HF models).",
+        )
+
         with st.form("model_form"):
             model = st.text_input("Model", HF_MODEL).strip()
 
@@ -709,6 +709,7 @@ def main():
                     params["MAX"],
                     params["DEFAULT"],
                     params["STEP"],
+                    disabled=not do_sample,
                 )
                 for name, params in GENERATION_CONFIG_PARAMS.items()
                 if "MAX" in params
@@ -734,13 +735,6 @@ def main():
                     "Together silently ignores it on non-reasoning models."
                 ),
             )
-
-            do_sample = st.checkbox(
-                GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
-                value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
-            )
-
-            decoding_seed = st.text_input("Decoding Seed").strip()
 
             st.markdown("---")
 
@@ -768,41 +762,6 @@ def main():
                     st.error("Model must be specified.")
                     st.stop()
 
-                if not decoding_seed:
-                    decoding_seed = None
-                elif decoding_seed.isnumeric():
-                    decoding_seed = int(decoding_seed)
-                else:
-                    st.error("Seed must be numeric or empty.")
-                    st.stop()
-
-                generation_confing_slider_sampling = {
-                    name: value
-                    for name, value in generation_config_sliders.items()
-                    if GENERATION_CONFIG_PARAMS[name]["SAMPLING"]
-                }
-                if (
-                    any(
-                        value != GENERATION_CONFIG_DEFAULTS[name]
-                        for name, value in generation_confing_slider_sampling.items()
-                    )
-                    and not do_sample
-                ):
-                    sampling_slider_default_values_info = " | ".join(
-                        f"{name}={GENERATION_CONFIG_DEFAULTS[name]}"
-                        for name in generation_confing_slider_sampling
-                    )
-                    st.error(
-                        f"Sampling must be enabled to use non default values for generation parameters: {sampling_slider_default_values_info}"
-                    )
-                    st.stop()
-
-                if decoding_seed is not None and not do_sample:
-                    st.error(
-                        "Sampling must be enabled to use a decoding seed. Otherwise, the seed field should be empty."
-                    )
-                    st.stop()
-
                 if not dataset_split_seed:
                     dataset_split_seed = None
                 elif dataset_split_seed.isnumeric():
@@ -813,7 +772,6 @@ def main():
 
                 generation_config = generation_config_sliders | dict(
                     do_sample=do_sample,
-                    seed=decoding_seed,
                     is_chat=False,  # Will be updated later based on model info
                     reasoning_effort=reasoning_effort,
                 )
