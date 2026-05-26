@@ -77,13 +77,12 @@ SEARCH_ROW_DICT = {"First": 0, "Last": -1}
 
 KNOWN_PROVIDERS = ("openai", "azure", "together", "openrouter", "azureml", "@")
 
-# TODO: Change start temperature to 0.0 when HF supports it
 GENERATION_CONFIG_PARAMS = {
     "temperature": {
         "NAME": "Temperature",
-        "MIN": 0.1,
+        "MIN": 0.0,
         "MAX": 5.0,
-        "DEFAULT": 1.0,
+        "DEFAULT": 0.0,
         "STEP": 0.1,
         "SAMPLING": True,
     },
@@ -99,10 +98,6 @@ GENERATION_CONFIG_PARAMS = {
         "OPTIONS": ["none", "low", "medium", "high"],
         "DEFAULT": "low",
         "SAMPLING": False,
-    },
-    "do_sample": {
-        "NAME": "Sampling",
-        "DEFAULT": False,
     },
     "is_chat": {
         "NAME": "Is Chat",
@@ -133,8 +128,8 @@ def prepare_huggingface_generation_config(generation_config):
     # `transformers`
     # According to experimentations, it seems that `transformers` behave similarly
 
-    # I'm not sure what is the right behavior here, but it is better to be explicit
-    do_sample = generation_config["do_sample"]
+    # Derive sampling-vs-greedy from temperature: 0 → greedy, >0 → sampling.
+    do_sample = (generation_config.get("temperature") or 0) > 0
     for name, params in GENERATION_CONFIG_PARAMS.items():
         # Only consider params that have a numeric range (i.e., slider/number inputs)
         if (
@@ -143,12 +138,13 @@ def prepare_huggingface_generation_config(generation_config):
             and name in generation_config
             and generation_config[name] is not None
         ):
-            if not do_sample or generation_config[name] == params["DEFAULT"]:
+            if not do_sample:
                 generation_config[name] = None
 
     if generation_config["is_chat"]:
         generation_config["max_tokens"] = generation_config.pop("max_new_tokens")
-        del generation_config["do_sample"]
+    else:
+        generation_config["do_sample"] = do_sample
 
     is_chat = generation_config.pop("is_chat")
 
@@ -228,12 +224,7 @@ def build_api_call_function(model):
                 reraise=True,
             )
             async def api_call_function(prompt, generation_config):
-                temperature = (
-                    generation_config["temperature"]
-                    if generation_config["do_sample"]
-                    else 0
-                )
-                parameters = {"temperature": temperature}
+                parameters = {"temperature": generation_config["temperature"]}
                 if generation_config["max_new_tokens"]:
                     parameters["max_tokens"] = generation_config["max_new_tokens"]
                 payload = {
@@ -261,11 +252,7 @@ def build_api_call_function(model):
             reraise=True,
         )
         async def api_call_function(prompt, generation_config):
-            temperature = (
-                generation_config["temperature"]
-                if generation_config["do_sample"]
-                else 0
-            )
+            temperature = generation_config["temperature"]
             max_tokens = generation_config["max_new_tokens"] or None
 
             if (
@@ -693,15 +680,6 @@ def main():
     st.title(TITLE)
 
     with st.sidebar:
-        # Sampling checkbox lives outside the form so toggling it triggers
-        # an immediate rerun and the Temperature slider greys/un-greys live.
-        # (Streamlit form widgets do not trigger reruns on interaction.)
-        do_sample = st.checkbox(
-            GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
-            value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
-            help="When off, temperature is forced to 0 (or greedy decoding for local HF models).",
-        )
-
         with st.form("model_form"):
             model = st.text_input("Model", HF_MODEL).strip()
 
@@ -712,7 +690,11 @@ def main():
                     params["MAX"],
                     params["DEFAULT"],
                     params["STEP"],
-                    disabled=not do_sample,
+                    help=(
+                        "Temperature 0 = greedy/deterministic decoding."
+                        if name == "temperature"
+                        else None
+                    ),
                 )
                 for name, params in GENERATION_CONFIG_PARAMS.items()
                 if "MAX" in params
@@ -774,7 +756,6 @@ def main():
                     st.stop()
 
                 generation_config = generation_config_sliders | dict(
-                    do_sample=do_sample,
                     is_chat=False,  # Will be updated later based on model info
                     reasoning_effort=reasoning_effort,
                 )
