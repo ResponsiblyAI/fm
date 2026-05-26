@@ -693,14 +693,14 @@ def main():
     st.title(TITLE)
 
     with st.sidebar:
-        do_sample = st.checkbox(
-            GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
-            value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
-            help="When off, temperature is forced to 0 (or greedy decoding for local HF models).",
-        )
-
         with st.form("model_form"):
             model = st.text_input("Model", HF_MODEL).strip()
+
+            do_sample = st.checkbox(
+                GENERATION_CONFIG_PARAMS["do_sample"]["NAME"],
+                value=GENERATION_CONFIG_PARAMS["do_sample"]["DEFAULT"],
+                help="When off, temperature is forced to 0 (or greedy decoding for local HF models).",
+            )
 
             generation_config_sliders = {
                 name: st.slider(
